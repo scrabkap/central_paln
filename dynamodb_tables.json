@@ -1,0 +1,746 @@
+{
+  "_comment": "Central Planning POC - DynamoDB CreateTable specs. Each entry is ready for `aws dynamodb create-table --cli-input-json file://...` or for translation to CDK/CloudFormation. BillingMode=PAY_PER_REQUEST throughout for POC. PointInTimeRecovery enabled on every table. See central_planning_erd.md for entity field specs, access patterns, and SAP mapping.",
+  "_version": "1.0",
+  "_generated": "2026-05-29",
+  "Tables": [
+    {
+      "TableName": "cp_items",
+      "_purpose": "Item master keyed by EAN-13 barcode. Sparse GSIs for leader (partner-in-stock) and group (mקבץ).",
+      "AttributeDefinitions": [
+        { "AttributeName": "PK", "AttributeType": "S" },
+        { "AttributeName": "SK", "AttributeType": "S" },
+        { "AttributeName": "GSI1PK", "AttributeType": "S" },
+        { "AttributeName": "GSI1SK", "AttributeType": "S" },
+        { "AttributeName": "GSI2PK", "AttributeType": "S" },
+        { "AttributeName": "GSI2SK", "AttributeType": "S" },
+        { "AttributeName": "GSI3PK", "AttributeType": "S" },
+        { "AttributeName": "GSI3SK", "AttributeType": "S" }
+      ],
+      "KeySchema": [
+        { "AttributeName": "PK", "KeyType": "HASH" },
+        { "AttributeName": "SK", "KeyType": "RANGE" }
+      ],
+      "GlobalSecondaryIndexes": [
+        {
+          "IndexName": "gsi1_by_leader",
+          "KeySchema": [
+            { "AttributeName": "GSI1PK", "KeyType": "HASH" },
+            { "AttributeName": "GSI1SK", "KeyType": "RANGE" }
+          ],
+          "Projection": { "ProjectionType": "ALL" }
+        },
+        {
+          "IndexName": "gsi2_by_group",
+          "KeySchema": [
+            { "AttributeName": "GSI2PK", "KeyType": "HASH" },
+            { "AttributeName": "GSI2SK", "KeyType": "RANGE" }
+          ],
+          "Projection": { "ProjectionType": "ALL" }
+        },
+        {
+          "IndexName": "gsi3_by_vendor",
+          "KeySchema": [
+            { "AttributeName": "GSI3PK", "KeyType": "HASH" },
+            { "AttributeName": "GSI3SK", "KeyType": "RANGE" }
+          ],
+          "Projection": { "ProjectionType": "ALL" }
+        }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": true },
+      "_key_patterns": {
+        "PK": "ITEM#{barcode}",
+        "SK": "METADATA",
+        "GSI1PK": "LEADER#{leading_barcode}",
+        "GSI1SK": "ITEM#{barcode}",
+        "GSI2PK": "GROUP#{item_group_code}",
+        "GSI2SK": "ITEM#{barcode}",
+        "GSI3PK": "VENDOR#{original_vendor_id}",
+        "GSI3SK": "ITEM#{barcode}"
+      },
+      "_item_attributes": ["barcode", "material_number", "description", "unit_type", "base_uom", "order_uom", "qty_per_order_unit", "leading_barcode", "item_group_code", "original_vendor_id", "display_type_default", "dept_lv2_code", "dept_lv2_name", "is_active", "created_at", "updated_at"]
+    },
+    {
+      "TableName": "cp_item_groups",
+      "_purpose": "מקבץ master.",
+      "AttributeDefinitions": [
+        { "AttributeName": "PK", "AttributeType": "S" },
+        { "AttributeName": "SK", "AttributeType": "S" }
+      ],
+      "KeySchema": [
+        { "AttributeName": "PK", "KeyType": "HASH" },
+        { "AttributeName": "SK", "KeyType": "RANGE" }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": true },
+      "_key_patterns": { "PK": "GROUP#{group_code}", "SK": "METADATA" },
+      "_item_attributes": ["group_code", "description", "leader_barcode", "purpose", "created_at", "updated_at"]
+    },
+    {
+      "TableName": "cp_formats",
+      "_purpose": "Distribution channel (VTWEG).",
+      "AttributeDefinitions": [
+        { "AttributeName": "PK", "AttributeType": "S" },
+        { "AttributeName": "SK", "AttributeType": "S" }
+      ],
+      "KeySchema": [
+        { "AttributeName": "PK", "KeyType": "HASH" },
+        { "AttributeName": "SK", "KeyType": "RANGE" }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": true },
+      "_key_patterns": { "PK": "FORMAT#{format_code}", "SK": "METADATA" },
+      "_item_attributes": ["format_code", "description", "is_active"]
+    },
+    {
+      "TableName": "cp_stores",
+      "_purpose": "Store master, GSI1 for stores-by-format.",
+      "AttributeDefinitions": [
+        { "AttributeName": "PK", "AttributeType": "S" },
+        { "AttributeName": "SK", "AttributeType": "S" },
+        { "AttributeName": "GSI1PK", "AttributeType": "S" },
+        { "AttributeName": "GSI1SK", "AttributeType": "S" }
+      ],
+      "KeySchema": [
+        { "AttributeName": "PK", "KeyType": "HASH" },
+        { "AttributeName": "SK", "KeyType": "RANGE" }
+      ],
+      "GlobalSecondaryIndexes": [
+        {
+          "IndexName": "gsi1_by_format",
+          "KeySchema": [
+            { "AttributeName": "GSI1PK", "KeyType": "HASH" },
+            { "AttributeName": "GSI1SK", "KeyType": "RANGE" }
+          ],
+          "Projection": { "ProjectionType": "ALL" }
+        }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": true },
+      "_key_patterns": {
+        "PK": "STORE#{store_id}",
+        "SK": "METADATA",
+        "GSI1PK": "FORMAT#{format_code}",
+        "GSI1SK": "STORE#{store_id}"
+      },
+      "_item_attributes": ["store_id", "name", "format_code", "store_size_class", "sale_capability_score", "is_active"]
+    },
+    {
+      "TableName": "cp_warehouses",
+      "AttributeDefinitions": [
+        { "AttributeName": "PK", "AttributeType": "S" },
+        { "AttributeName": "SK", "AttributeType": "S" }
+      ],
+      "KeySchema": [
+        { "AttributeName": "PK", "KeyType": "HASH" },
+        { "AttributeName": "SK", "KeyType": "RANGE" }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": true },
+      "_key_patterns": { "PK": "WAREHOUSE#{warehouse_id}", "SK": "METADATA" },
+      "_item_attributes": ["warehouse_id", "name", "is_active"]
+    },
+    {
+      "TableName": "cp_vendors",
+      "AttributeDefinitions": [
+        { "AttributeName": "PK", "AttributeType": "S" },
+        { "AttributeName": "SK", "AttributeType": "S" }
+      ],
+      "KeySchema": [
+        { "AttributeName": "PK", "KeyType": "HASH" },
+        { "AttributeName": "SK", "KeyType": "RANGE" }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": true },
+      "_key_patterns": { "PK": "VENDOR#{vendor_id}", "SK": "METADATA" },
+      "_item_attributes": ["vendor_id", "name", "default_lead_time_days", "is_active"]
+    },
+    {
+      "TableName": "cp_display_types",
+      "_purpose": "Z-code lookup (Z137 = גונדולה משתנה, etc.).",
+      "AttributeDefinitions": [
+        { "AttributeName": "PK", "AttributeType": "S" },
+        { "AttributeName": "SK", "AttributeType": "S" }
+      ],
+      "KeySchema": [
+        { "AttributeName": "PK", "KeyType": "HASH" },
+        { "AttributeName": "SK", "KeyType": "RANGE" }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": true },
+      "_key_patterns": { "PK": "DISPLAY_TYPE#{code}", "SK": "METADATA" },
+      "_item_attributes": ["code", "description_he", "description_en", "is_sap_standard"]
+    },
+    {
+      "TableName": "cp_assortment",
+      "_purpose": "Both STORE_FORMAT and WAREHOUSE assortment rows. GSI1 = which formats/WHs carry an item.",
+      "AttributeDefinitions": [
+        { "AttributeName": "PK", "AttributeType": "S" },
+        { "AttributeName": "SK", "AttributeType": "S" },
+        { "AttributeName": "GSI1PK", "AttributeType": "S" },
+        { "AttributeName": "GSI1SK", "AttributeType": "S" },
+        { "AttributeName": "GSI2PK", "AttributeType": "S" },
+        { "AttributeName": "GSI2SK", "AttributeType": "S" }
+      ],
+      "KeySchema": [
+        { "AttributeName": "PK", "KeyType": "HASH" },
+        { "AttributeName": "SK", "KeyType": "RANGE" }
+      ],
+      "GlobalSecondaryIndexes": [
+        {
+          "IndexName": "gsi1_by_item",
+          "KeySchema": [
+            { "AttributeName": "GSI1PK", "KeyType": "HASH" },
+            { "AttributeName": "GSI1SK", "KeyType": "RANGE" }
+          ],
+          "Projection": { "ProjectionType": "ALL" }
+        },
+        {
+          "IndexName": "gsi2_by_vendor",
+          "KeySchema": [
+            { "AttributeName": "GSI2PK", "KeyType": "HASH" },
+            { "AttributeName": "GSI2SK", "KeyType": "RANGE" }
+          ],
+          "Projection": { "ProjectionType": "ALL" }
+        }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": true },
+      "_key_patterns": {
+        "PK": "{parent_scope}#{parent_id}    // e.g. FORMAT#8 or WAREHOUSE#6000",
+        "SK": "ITEM#{barcode}",
+        "GSI1PK": "ITEM#{barcode}",
+        "GSI1SK": "{parent_scope}#{parent_id}",
+        "GSI2PK": "VENDOR#{supply_vendor_id}",
+        "GSI2SK": "ITEM#{barcode}"
+      },
+      "_item_attributes": ["parent_scope", "parent_id", "item_barcode", "active_from", "active_to", "is_blocked_for_order", "supply_method", "supply_vendor_id", "original_vendor_id", "notes", "created_at", "updated_at"]
+    },
+    {
+      "TableName": "cp_store_planogram",
+      "AttributeDefinitions": [
+        { "AttributeName": "PK", "AttributeType": "S" },
+        { "AttributeName": "SK", "AttributeType": "S" }
+      ],
+      "KeySchema": [
+        { "AttributeName": "PK", "KeyType": "HASH" },
+        { "AttributeName": "SK", "KeyType": "RANGE" }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": true },
+      "_key_patterns": { "PK": "STORE#{store_id}", "SK": "ITEM#{barcode}" },
+      "_item_attributes": ["store_id", "item_barcode", "display_type_code", "planogram_min_stock_qty", "effective_from"]
+    },
+    {
+      "TableName": "cp_wh_9box",
+      "_purpose": "Current 9-BOX classification + derived reorder/target. Use cp_wh_9box_history for audit if needed (separate table, not created here).",
+      "AttributeDefinitions": [
+        { "AttributeName": "PK", "AttributeType": "S" },
+        { "AttributeName": "SK", "AttributeType": "S" },
+        { "AttributeName": "GSI1PK", "AttributeType": "S" },
+        { "AttributeName": "GSI1SK", "AttributeType": "S" }
+      ],
+      "KeySchema": [
+        { "AttributeName": "PK", "KeyType": "HASH" },
+        { "AttributeName": "SK", "KeyType": "RANGE" }
+      ],
+      "GlobalSecondaryIndexes": [
+        {
+          "IndexName": "gsi1_by_bucket",
+          "KeySchema": [
+            { "AttributeName": "GSI1PK", "KeyType": "HASH" },
+            { "AttributeName": "GSI1SK", "KeyType": "RANGE" }
+          ],
+          "Projection": { "ProjectionType": "ALL" }
+        }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": true },
+      "_key_patterns": {
+        "PK": "WAREHOUSE#{warehouse_id}",
+        "SK": "ITEM#{barcode}",
+        "GSI1PK": "BUCKET#VEL_{velocity_class}#ACC_{forecast_accuracy_class}",
+        "GSI1SK": "WAREHOUSE#{warehouse_id}#ITEM#{barcode}"
+      },
+      "_item_attributes": ["warehouse_id", "item_barcode", "velocity_class", "forecast_accuracy_class", "vendor_lead_time_days", "forecast_for_period_qty", "reorder_point_qty", "target_stock_level_qty", "effective_from", "derived_at", "source"]
+    },
+    {
+      "TableName": "cp_location_stock",
+      "AttributeDefinitions": [
+        { "AttributeName": "PK", "AttributeType": "S" },
+        { "AttributeName": "SK", "AttributeType": "S" },
+        { "AttributeName": "GSI1PK", "AttributeType": "S" },
+        { "AttributeName": "GSI1SK", "AttributeType": "S" }
+      ],
+      "KeySchema": [
+        { "AttributeName": "PK", "KeyType": "HASH" },
+        { "AttributeName": "SK", "KeyType": "RANGE" }
+      ],
+      "GlobalSecondaryIndexes": [
+        {
+          "IndexName": "gsi1_by_item",
+          "KeySchema": [
+            { "AttributeName": "GSI1PK", "KeyType": "HASH" },
+            { "AttributeName": "GSI1SK", "KeyType": "RANGE" }
+          ],
+          "Projection": { "ProjectionType": "ALL" }
+        }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": true },
+      "_key_patterns": {
+        "PK": "{location_scope}#{location_id}",
+        "SK": "ITEM#{barcode}",
+        "GSI1PK": "ITEM#{barcode}",
+        "GSI1SK": "{location_scope}#{location_id}"
+      },
+      "_item_attributes": ["location_scope", "location_id", "item_barcode", "on_hand_qty_base", "last_counted_at"]
+    },
+    {
+      "TableName": "cp_stock_on_the_way",
+      "_purpose": "Materialized aggregate of open inbound PO lines per location-item. Refreshed by stream from cp_purchase_orders.",
+      "AttributeDefinitions": [
+        { "AttributeName": "PK", "AttributeType": "S" },
+        { "AttributeName": "SK", "AttributeType": "S" },
+        { "AttributeName": "GSI1PK", "AttributeType": "S" },
+        { "AttributeName": "GSI1SK", "AttributeType": "S" }
+      ],
+      "KeySchema": [
+        { "AttributeName": "PK", "KeyType": "HASH" },
+        { "AttributeName": "SK", "KeyType": "RANGE" }
+      ],
+      "GlobalSecondaryIndexes": [
+        {
+          "IndexName": "gsi1_by_item",
+          "KeySchema": [
+            { "AttributeName": "GSI1PK", "KeyType": "HASH" },
+            { "AttributeName": "GSI1SK", "KeyType": "RANGE" }
+          ],
+          "Projection": { "ProjectionType": "ALL" }
+        }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": true },
+      "_key_patterns": {
+        "PK": "{location_scope}#{location_id}",
+        "SK": "ITEM#{barcode}",
+        "GSI1PK": "ITEM#{barcode}",
+        "GSI1SK": "{location_scope}#{location_id}"
+      },
+      "_item_attributes": ["location_scope", "location_id", "item_barcode", "qty_base", "next_expected_arrival_at", "po_ids", "last_recomputed_at"]
+    },
+    {
+      "TableName": "cp_wh_mrp",
+      "_purpose": "Daily WH MRP recommendation snapshot. TTL recommended on snapshot_date+90d (set on attribute `ttl_epoch`).",
+      "AttributeDefinitions": [
+        { "AttributeName": "PK", "AttributeType": "S" },
+        { "AttributeName": "SK", "AttributeType": "S" },
+        { "AttributeName": "GSI1PK", "AttributeType": "S" },
+        { "AttributeName": "GSI1SK", "AttributeType": "S" },
+        { "AttributeName": "GSI2PK", "AttributeType": "S" },
+        { "AttributeName": "GSI2SK", "AttributeType": "S" }
+      ],
+      "KeySchema": [
+        { "AttributeName": "PK", "KeyType": "HASH" },
+        { "AttributeName": "SK", "KeyType": "RANGE" }
+      ],
+      "GlobalSecondaryIndexes": [
+        {
+          "IndexName": "gsi1_by_item_date",
+          "KeySchema": [
+            { "AttributeName": "GSI1PK", "KeyType": "HASH" },
+            { "AttributeName": "GSI1SK", "KeyType": "RANGE" }
+          ],
+          "Projection": { "ProjectionType": "ALL" }
+        },
+        {
+          "IndexName": "gsi2_by_vendor_date",
+          "KeySchema": [
+            { "AttributeName": "GSI2PK", "KeyType": "HASH" },
+            { "AttributeName": "GSI2SK", "KeyType": "RANGE" }
+          ],
+          "Projection": { "ProjectionType": "ALL" }
+        }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": true },
+      "TimeToLiveSpecification": { "AttributeName": "ttl_epoch", "Enabled": true },
+      "_key_patterns": {
+        "PK": "WAREHOUSE#{warehouse_id}#DATE#{snapshot_date}",
+        "SK": "ITEM#{barcode}",
+        "GSI1PK": "ITEM#{barcode}#DATE#{snapshot_date}",
+        "GSI1SK": "WAREHOUSE#{warehouse_id}",
+        "GSI2PK": "VENDOR#{vendor_id}#DATE#{snapshot_date}",
+        "GSI2SK": "WAREHOUSE#{warehouse_id}#ITEM#{barcode}"
+      },
+      "_item_attributes": ["snapshot_date", "run_timestamp", "warehouse_id", "item_barcode", "vendor_id", "recom_qty_base", "recom_qty_order_unit", "current_stock_days", "reorder_point_qty", "target_stock_level_qty", "sd_orders_qty", "sto_orders_qty", "forecast_coverage_qty", "stock_on_the_way_qty", "lead_time_days", "adoption_status", "ttl_epoch"]
+    },
+    {
+      "TableName": "cp_store_mrp",
+      "_purpose": "Per-order-day store MRP at leading-barcode granularity.",
+      "AttributeDefinitions": [
+        { "AttributeName": "PK", "AttributeType": "S" },
+        { "AttributeName": "SK", "AttributeType": "S" },
+        { "AttributeName": "GSI1PK", "AttributeType": "S" },
+        { "AttributeName": "GSI1SK", "AttributeType": "S" },
+        { "AttributeName": "GSI2PK", "AttributeType": "S" },
+        { "AttributeName": "GSI2SK", "AttributeType": "S" }
+      ],
+      "KeySchema": [
+        { "AttributeName": "PK", "KeyType": "HASH" },
+        { "AttributeName": "SK", "KeyType": "RANGE" }
+      ],
+      "GlobalSecondaryIndexes": [
+        {
+          "IndexName": "gsi1_by_lead_date",
+          "KeySchema": [
+            { "AttributeName": "GSI1PK", "KeyType": "HASH" },
+            { "AttributeName": "GSI1SK", "KeyType": "RANGE" }
+          ],
+          "Projection": { "ProjectionType": "ALL" }
+        },
+        {
+          "IndexName": "gsi2_by_source_date",
+          "KeySchema": [
+            { "AttributeName": "GSI2PK", "KeyType": "HASH" },
+            { "AttributeName": "GSI2SK", "KeyType": "RANGE" }
+          ],
+          "Projection": { "ProjectionType": "ALL" }
+        }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": true },
+      "TimeToLiveSpecification": { "AttributeName": "ttl_epoch", "Enabled": true },
+      "_key_patterns": {
+        "PK": "STORE#{store_id}#DATE#{snapshot_date}",
+        "SK": "LEAD#{leading_barcode}",
+        "GSI1PK": "LEAD#{leading_barcode}#DATE#{snapshot_date}",
+        "GSI1SK": "STORE#{store_id}",
+        "GSI2PK": "SOURCE#{supply_method}#{supply_source_id}#DATE#{snapshot_date}",
+        "GSI2SK": "STORE#{store_id}#LEAD#{leading_barcode}"
+      },
+      "_item_attributes": ["snapshot_date", "run_timestamp", "store_id", "leading_barcode", "supply_method", "supply_source_id", "recom_qty_base", "recom_qty_order_unit", "operational_stock_qty", "min_safety_stock_qty", "lead_time_days", "stock_on_the_way_qty", "forecast_coverage_qty", "next_delivery_date", "adoption_status", "ttl_epoch"]
+    },
+    {
+      "TableName": "cp_central_planner",
+      "_purpose": "Single-table for central planner run header + all per-store-item allocations. PK=RUN#id, SK varies.",
+      "AttributeDefinitions": [
+        { "AttributeName": "PK", "AttributeType": "S" },
+        { "AttributeName": "SK", "AttributeType": "S" },
+        { "AttributeName": "GSI1PK", "AttributeType": "S" },
+        { "AttributeName": "GSI1SK", "AttributeType": "S" },
+        { "AttributeName": "GSI2PK", "AttributeType": "S" },
+        { "AttributeName": "GSI2SK", "AttributeType": "S" }
+      ],
+      "KeySchema": [
+        { "AttributeName": "PK", "KeyType": "HASH" },
+        { "AttributeName": "SK", "KeyType": "RANGE" }
+      ],
+      "GlobalSecondaryIndexes": [
+        {
+          "IndexName": "gsi1_by_status_date",
+          "KeySchema": [
+            { "AttributeName": "GSI1PK", "KeyType": "HASH" },
+            { "AttributeName": "GSI1SK", "KeyType": "RANGE" }
+          ],
+          "Projection": { "ProjectionType": "ALL" }
+        },
+        {
+          "IndexName": "gsi2_by_linked_promo",
+          "KeySchema": [
+            { "AttributeName": "GSI2PK", "KeyType": "HASH" },
+            { "AttributeName": "GSI2SK", "KeyType": "RANGE" }
+          ],
+          "Projection": { "ProjectionType": "ALL" }
+        }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": true },
+      "_key_patterns": {
+        "PK": "RUN#{run_id}",
+        "SK_metadata": "METADATA",
+        "SK_allocation": "ALLOCATION#STORE#{store_id}#LEAD#{leading_barcode}",
+        "GSI1PK": "STATUS#{status}",
+        "GSI1SK": "CREATED#{created_at}#RUN#{run_id}",
+        "GSI2PK": "PROMO#{linked_promo_id}",
+        "GSI2SK": "RUN#{run_id}"
+      },
+      "_metadata_attributes": ["run_id", "start_date", "coverage_days", "optional_force_qty", "store_filter", "item_filter", "linked_promo_id", "created_by", "created_at", "status"],
+      "_allocation_attributes": ["run_id", "store_id", "leading_barcode", "supply_method", "supply_source_id", "recom_qty_base", "recom_qty_order_unit", "operational_stock_qty", "planogram_min_stock_qty", "stock_on_the_way_qty", "forecast_coverage_qty", "store_size_class", "sale_capability_score", "forced_qty", "final_qty"]
+    },
+    {
+      "TableName": "cp_purchase_orders",
+      "_purpose": "Single-table for PO header + lines. GSIs cover the common access dimensions (source location, vendor, item, linked promo).",
+      "AttributeDefinitions": [
+        { "AttributeName": "PK", "AttributeType": "S" },
+        { "AttributeName": "SK", "AttributeType": "S" },
+        { "AttributeName": "GSI1PK", "AttributeType": "S" },
+        { "AttributeName": "GSI1SK", "AttributeType": "S" },
+        { "AttributeName": "GSI2PK", "AttributeType": "S" },
+        { "AttributeName": "GSI2SK", "AttributeType": "S" },
+        { "AttributeName": "GSI3PK", "AttributeType": "S" },
+        { "AttributeName": "GSI3SK", "AttributeType": "S" },
+        { "AttributeName": "GSI4PK", "AttributeType": "S" },
+        { "AttributeName": "GSI4SK", "AttributeType": "S" }
+      ],
+      "KeySchema": [
+        { "AttributeName": "PK", "KeyType": "HASH" },
+        { "AttributeName": "SK", "KeyType": "RANGE" }
+      ],
+      "GlobalSecondaryIndexes": [
+        { "IndexName": "gsi1_by_source_date", "KeySchema": [{ "AttributeName": "GSI1PK", "KeyType": "HASH" }, { "AttributeName": "GSI1SK", "KeyType": "RANGE" }], "Projection": { "ProjectionType": "ALL" } },
+        { "IndexName": "gsi2_by_vendor_date", "KeySchema": [{ "AttributeName": "GSI2PK", "KeyType": "HASH" }, { "AttributeName": "GSI2SK", "KeyType": "RANGE" }], "Projection": { "ProjectionType": "ALL" } },
+        { "IndexName": "gsi3_by_item_date", "KeySchema": [{ "AttributeName": "GSI3PK", "KeyType": "HASH" }, { "AttributeName": "GSI3SK", "KeyType": "RANGE" }], "Projection": { "ProjectionType": "ALL" } },
+        { "IndexName": "gsi4_by_linked_promo", "KeySchema": [{ "AttributeName": "GSI4PK", "KeyType": "HASH" }, { "AttributeName": "GSI4SK", "KeyType": "RANGE" }], "Projection": { "ProjectionType": "ALL" } }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": true },
+      "StreamSpecification": { "StreamEnabled": true, "StreamViewType": "NEW_AND_OLD_IMAGES" },
+      "_key_patterns": {
+        "PK": "PO#{po_id}",
+        "SK_header": "HEADER",
+        "SK_line": "LINE#{line_no:04d}",
+        "GSI1PK": "SOURCE#{source_location_scope}#{source_location_id}",
+        "GSI1SK": "DATE#{created_at}#PO#{po_id}",
+        "GSI2PK": "VENDOR#{vendor_id}",
+        "GSI2SK": "DATE#{created_at}#PO#{po_id}",
+        "GSI3PK": "ITEM#{item_barcode}     // line rows only",
+        "GSI3SK": "DATE#{created_at}#PO#{po_id}#LINE#{line_no}",
+        "GSI4PK": "PROMO#{linked_promo_id}",
+        "GSI4SK": "DATE#{created_at}#PO#{po_id}"
+      },
+      "_header_attributes": ["po_id", "po_number", "po_type", "source_location_scope", "source_location_id", "destination_location_scope", "destination_location_id", "vendor_id", "origin", "linked_promo_id", "linked_run_id", "status", "created_at", "expected_delivery_date", "delivered_at"],
+      "_line_attributes": ["po_id", "line_no", "item_barcode", "qty_base", "qty_order_unit", "source_mrp_line_id", "unit_cost"]
+    },
+    {
+      "TableName": "cp_forecast",
+      "_purpose": "Forecast per location-item-period. Always stored against the leading_barcode for partner-in-stock items.",
+      "AttributeDefinitions": [
+        { "AttributeName": "PK", "AttributeType": "S" },
+        { "AttributeName": "SK", "AttributeType": "S" },
+        { "AttributeName": "GSI1PK", "AttributeType": "S" },
+        { "AttributeName": "GSI1SK", "AttributeType": "S" }
+      ],
+      "KeySchema": [
+        { "AttributeName": "PK", "KeyType": "HASH" },
+        { "AttributeName": "SK", "KeyType": "RANGE" }
+      ],
+      "GlobalSecondaryIndexes": [
+        {
+          "IndexName": "gsi1_by_item_period",
+          "KeySchema": [
+            { "AttributeName": "GSI1PK", "KeyType": "HASH" },
+            { "AttributeName": "GSI1SK", "KeyType": "RANGE" }
+          ],
+          "Projection": { "ProjectionType": "ALL" }
+        }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": true },
+      "TimeToLiveSpecification": { "AttributeName": "ttl_epoch", "Enabled": true },
+      "_key_patterns": {
+        "PK": "{location_scope}#{location_id}#ITEM#{barcode}",
+        "SK": "PERIOD#{period_start}#{period_end}",
+        "GSI1PK": "ITEM#{barcode}",
+        "GSI1SK": "PERIOD#{period_start}#{location_scope}#{location_id}"
+      },
+      "_item_attributes": ["location_scope", "location_id", "item_barcode", "period_start", "period_end", "forecast_qty_base", "forecast_source", "provider_value_qty_base", "confidence_class", "anchor_tec_qty", "provider_run_id", "last_updated_at", "last_updated_by", "ttl_epoch"]
+    },
+    {
+      "TableName": "cp_promotions",
+      "_purpose": "Single-table promotion aggregate: header + ACES strength forecasts + per-store-item allocation + WH supply waves. Multiple GSIs because promotion queries span many dimensions (status, format, store-item, representing barcode).",
+      "AttributeDefinitions": [
+        { "AttributeName": "PK", "AttributeType": "S" },
+        { "AttributeName": "SK", "AttributeType": "S" },
+        { "AttributeName": "GSI1PK", "AttributeType": "S" },
+        { "AttributeName": "GSI1SK", "AttributeType": "S" },
+        { "AttributeName": "GSI2PK", "AttributeType": "S" },
+        { "AttributeName": "GSI2SK", "AttributeType": "S" },
+        { "AttributeName": "GSI3PK", "AttributeType": "S" },
+        { "AttributeName": "GSI3SK", "AttributeType": "S" },
+        { "AttributeName": "GSI4PK", "AttributeType": "S" },
+        { "AttributeName": "GSI4SK", "AttributeType": "S" }
+      ],
+      "KeySchema": [
+        { "AttributeName": "PK", "KeyType": "HASH" },
+        { "AttributeName": "SK", "KeyType": "RANGE" }
+      ],
+      "GlobalSecondaryIndexes": [
+        { "IndexName": "gsi1_by_status_date", "KeySchema": [{ "AttributeName": "GSI1PK", "KeyType": "HASH" }, { "AttributeName": "GSI1SK", "KeyType": "RANGE" }], "Projection": { "ProjectionType": "ALL" } },
+        { "IndexName": "gsi2_by_format_date", "KeySchema": [{ "AttributeName": "GSI2PK", "KeyType": "HASH" }, { "AttributeName": "GSI2SK", "KeyType": "RANGE" }], "Projection": { "ProjectionType": "ALL" } },
+        { "IndexName": "gsi3_by_store_item", "KeySchema": [{ "AttributeName": "GSI3PK", "KeyType": "HASH" }, { "AttributeName": "GSI3SK", "KeyType": "RANGE" }], "Projection": { "ProjectionType": "ALL" } },
+        { "IndexName": "gsi4_by_representing_barcode", "KeySchema": [{ "AttributeName": "GSI4PK", "KeyType": "HASH" }, { "AttributeName": "GSI4SK", "KeyType": "RANGE" }], "Projection": { "ProjectionType": "ALL" } }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": true },
+      "StreamSpecification": { "StreamEnabled": true, "StreamViewType": "NEW_AND_OLD_IMAGES" },
+      "_key_patterns": {
+        "PK": "PROMO#{promo_id}",
+        "SK_metadata": "METADATA",
+        "SK_aces_strength": "ACES_STRENGTH#{strength_class}",
+        "SK_allocation": "ALLOC#STORE#{store_id}#ITEM#{barcode}",
+        "SK_wh_wave": "WH_WAVE#{warehouse_id}#WAVE#{wave_no:02d}",
+        "GSI1PK": "STATUS#{status}",
+        "GSI1SK": "START#{start_date}#PROMO#{promo_id}",
+        "GSI2PK": "FORMAT#{format_code}",
+        "GSI2SK": "START#{start_date}#PROMO#{promo_id}",
+        "GSI3PK": "STORE#{store_id}#ITEM#{item_barcode}     // allocation rows only",
+        "GSI3SK": "START#{start_date}#PROMO#{promo_id}",
+        "GSI4PK": "REP_BARCODE#{representing_barcode}",
+        "GSI4SK": "START#{start_date}#PROMO#{promo_id}"
+      },
+      "_metadata_attributes": ["promo_id", "activity_type", "format_code", "display_type_code", "promo_type_code", "is_newspaper", "loyalty_segment_code", "coupon_required", "representing_barcode", "item_group_code", "description", "sap_action_number", "campaign_code", "reward_code", "catalog_price", "promo_price", "gift_pma_qty", "start_date", "end_date", "trade_agreement_qty", "store_count", "forecast_anchor_tec_qty", "status", "wave_strategy", "created_at", "updated_at"],
+      "_aces_strength_attributes": ["promo_id", "strength_class", "anchor_tec_forecast_qty", "selected_by_user"],
+      "_allocation_attributes": ["promo_id", "store_id", "item_barcode", "supply_method", "supply_source_id", "original_vendor_id", "display_type_code", "allocated_qty_base", "ordered_qty_base", "sold_qty_base", "forecast_anchor_tec_qty"],
+      "_wh_wave_attributes": ["promo_id", "warehouse_id", "wave_no", "target_qty_base", "planned_arrival_date", "actual_arrival_date", "status", "linked_po_id"]
+    },
+    {
+      "TableName": "cp_cannibalization_suggestions",
+      "_purpose": "Raw suggestions from the forecasting vendor before planner approval.",
+      "AttributeDefinitions": [
+        { "AttributeName": "PK", "AttributeType": "S" },
+        { "AttributeName": "SK", "AttributeType": "S" },
+        { "AttributeName": "GSI1PK", "AttributeType": "S" },
+        { "AttributeName": "GSI1SK", "AttributeType": "S" }
+      ],
+      "KeySchema": [
+        { "AttributeName": "PK", "KeyType": "HASH" },
+        { "AttributeName": "SK", "KeyType": "RANGE" }
+      ],
+      "GlobalSecondaryIndexes": [
+        {
+          "IndexName": "gsi1_by_status_date",
+          "KeySchema": [
+            { "AttributeName": "GSI1PK", "KeyType": "HASH" },
+            { "AttributeName": "GSI1SK", "KeyType": "RANGE" }
+          ],
+          "Projection": { "ProjectionType": "ALL" }
+        }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": true },
+      "_key_patterns": {
+        "PK": "SUGGESTION#{suggestion_id}",
+        "SK": "METADATA",
+        "GSI1PK": "STATUS#{status}",
+        "GSI1SK": "SUGGESTED#{suggested_at}#SUGGESTION#{suggestion_id}"
+      },
+      "_item_attributes": ["suggestion_id", "provider_run_id", "suggested_at", "status", "member_barcodes", "confidence", "tree_id"]
+    },
+    {
+      "TableName": "cp_cannibalization_trees",
+      "_purpose": "Single-table tree + members. Influence percentages sum to 100 per tree (validated at app level).",
+      "AttributeDefinitions": [
+        { "AttributeName": "PK", "AttributeType": "S" },
+        { "AttributeName": "SK", "AttributeType": "S" },
+        { "AttributeName": "GSI1PK", "AttributeType": "S" },
+        { "AttributeName": "GSI1SK", "AttributeType": "S" },
+        { "AttributeName": "GSI2PK", "AttributeType": "S" },
+        { "AttributeName": "GSI2SK", "AttributeType": "S" }
+      ],
+      "KeySchema": [
+        { "AttributeName": "PK", "KeyType": "HASH" },
+        { "AttributeName": "SK", "KeyType": "RANGE" }
+      ],
+      "GlobalSecondaryIndexes": [
+        { "IndexName": "gsi1_by_status_date", "KeySchema": [{ "AttributeName": "GSI1PK", "KeyType": "HASH" }, { "AttributeName": "GSI1SK", "KeyType": "RANGE" }], "Projection": { "ProjectionType": "ALL" } },
+        { "IndexName": "gsi2_by_item", "KeySchema": [{ "AttributeName": "GSI2PK", "KeyType": "HASH" }, { "AttributeName": "GSI2SK", "KeyType": "RANGE" }], "Projection": { "ProjectionType": "ALL" } }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": true },
+      "StreamSpecification": { "StreamEnabled": true, "StreamViewType": "NEW_AND_OLD_IMAGES" },
+      "_key_patterns": {
+        "PK": "TREE#{tree_id}",
+        "SK_metadata": "METADATA",
+        "SK_member": "MEMBER#ITEM#{item_barcode}",
+        "GSI1PK": "STATUS#{status}",
+        "GSI1SK": "CREATED#{created_at}#TREE#{tree_id}",
+        "GSI2PK": "ITEM#{item_barcode}     // member rows only",
+        "GSI2SK": "TREE#{tree_id}"
+      },
+      "_metadata_attributes": ["tree_id", "tree_type", "status", "created_by", "created_at", "approved_by", "approved_at", "source_suggestion_id", "notes"],
+      "_member_attributes": ["tree_id", "item_barcode", "influence_percent", "baseline_forecast_qty", "adjusted_forecast_qty", "last_recomputed_at"]
+    },
+    {
+      "TableName": "cp_oos_blocks",
+      "AttributeDefinitions": [
+        { "AttributeName": "PK", "AttributeType": "S" },
+        { "AttributeName": "SK", "AttributeType": "S" },
+        { "AttributeName": "GSI1PK", "AttributeType": "S" },
+        { "AttributeName": "GSI1SK", "AttributeType": "S" },
+        { "AttributeName": "GSI2PK", "AttributeType": "S" },
+        { "AttributeName": "GSI2SK", "AttributeType": "S" }
+      ],
+      "KeySchema": [
+        { "AttributeName": "PK", "KeyType": "HASH" },
+        { "AttributeName": "SK", "KeyType": "RANGE" }
+      ],
+      "GlobalSecondaryIndexes": [
+        { "IndexName": "gsi1_by_item_date", "KeySchema": [{ "AttributeName": "GSI1PK", "KeyType": "HASH" }, { "AttributeName": "GSI1SK", "KeyType": "RANGE" }], "Projection": { "ProjectionType": "ALL" } },
+        { "IndexName": "gsi2_by_promo", "KeySchema": [{ "AttributeName": "GSI2PK", "KeyType": "HASH" }, { "AttributeName": "GSI2SK", "KeyType": "RANGE" }], "Projection": { "ProjectionType": "ALL" } }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": true },
+      "_key_patterns": {
+        "PK": "STORE#{store_id}#ITEM#{barcode}",
+        "SK": "FROM#{blocked_from}#BLOCK#{block_id}",
+        "GSI1PK": "ITEM#{barcode}",
+        "GSI1SK": "FROM#{blocked_from}#STORE#{store_id}",
+        "GSI2PK": "PROMO#{linked_promo_id}",
+        "GSI2SK": "STORE#{store_id}#ITEM#{barcode}"
+      },
+      "_item_attributes": ["block_id", "store_id", "item_barcode", "blocked_from", "blocked_to", "reason", "linked_promo_id", "blocked_by", "is_active"]
+    },
+    {
+      "TableName": "cp_trade_agreements",
+      "AttributeDefinitions": [
+        { "AttributeName": "PK", "AttributeType": "S" },
+        { "AttributeName": "SK", "AttributeType": "S" },
+        { "AttributeName": "GSI1PK", "AttributeType": "S" },
+        { "AttributeName": "GSI1SK", "AttributeType": "S" }
+      ],
+      "KeySchema": [
+        { "AttributeName": "PK", "KeyType": "HASH" },
+        { "AttributeName": "SK", "KeyType": "RANGE" }
+      ],
+      "GlobalSecondaryIndexes": [
+        {
+          "IndexName": "gsi1_by_promo",
+          "KeySchema": [
+            { "AttributeName": "GSI1PK", "KeyType": "HASH" },
+            { "AttributeName": "GSI1SK", "KeyType": "RANGE" }
+          ],
+          "Projection": { "ProjectionType": "ALL" }
+        }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": true },
+      "_key_patterns": {
+        "PK": "VENDOR#{vendor_id}#SCOPE#{scope_type}#{scope_id}",
+        "SK": "PERIOD#{period_start}#{period_end}#AGREEMENT#{agreement_id}",
+        "GSI1PK": "PROMO#{linked_promo_id}",
+        "GSI1SK": "VENDOR#{vendor_id}#{scope_type}#{scope_id}"
+      },
+      "_item_attributes": ["agreement_id", "vendor_id", "scope_type", "scope_id", "agreement_qty_base", "period_start", "period_end", "linked_promo_id", "notes"]
+    },
+    {
+      "TableName": "cp_sap_mapping",
+      "_purpose": "Runtime lookup of logical_entity.logical_field -> sap_table.sap_field. Seed file produced separately.",
+      "AttributeDefinitions": [
+        { "AttributeName": "PK", "AttributeType": "S" },
+        { "AttributeName": "SK", "AttributeType": "S" }
+      ],
+      "KeySchema": [
+        { "AttributeName": "PK", "KeyType": "HASH" },
+        { "AttributeName": "SK", "KeyType": "RANGE" }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": true },
+      "_key_patterns": {
+        "PK": "ENTITY#{logical_entity}",
+        "SK": "FIELD#{logical_field}"
+      },
+      "_item_attributes": ["logical_entity", "logical_field", "sap_table", "sap_field", "join_or_filter_note"]
+    }
+  ]
+}
