@@ -556,8 +556,6 @@ PAGES.promotions.after = () => {
     if (tt) { state._promoTech = !state._promoTech; renderPromo(); return; }
     const sf = e.target.closest("[data-status]");
     if (sf) { state._promoF.status = sf.dataset.status; renderPromo(); return; }
-    const kf = e.target.closest("[data-kpifilter]");
-    if (kf) { state._promoF.status = kf.dataset.kpifilter; renderPromo(); return; }
     const o = e.target.closest("[data-open]");
     if (o) { const s = o.dataset.open; s.startsWith("promo:") ? navigate("promotions/" + s.slice(6)) : openAggPopup(s); return; }
     const t = e.target.closest("[data-toggle]");
@@ -667,7 +665,8 @@ function nodeTrade(node) {
   return [...new Set(node.allocs.map((a) => a.promo_id))].reduce((s, pid) => s + (node.pmap[pid] ? effectiveTrade(node.pmap[pid]) : 0), 0);
 }
 const LEVEL_HE = { format: "פורמט", vendor: "ספק", display: "אמצעי תצוגה", category: "היררכיית פריט", promo: "מבצע" };
-const chevronSVG = (open) => `<svg class="tree-chev" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="transform:rotate(${open ? 90 : 0}deg)"><path d="M9 6l6 6-6 6"/></svg>`;
+// RTL: collapsed chevron points left ('<'); rotates to point down when open
+const chevronSVG = (open) => `<svg class="tree-chev" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="transform:rotate(${open ? -90 : 0}deg)"><path d="M15 6l-6 6 6 6"/></svg>`;
 function renderPromoNode(node) {
   const m = aggNode(node);
   const isPromo = node.kind === "promo";
@@ -800,31 +799,13 @@ function renderPromo() {
       }
       return true;
     });
-  const awaiting = dimScoped.filter((p) => promoDecisionStatus(p) === "awaiting");
-  const locked = dimScoped.filter((p) => promoDecisionStatus(p) === "locked");
-  const live = dimScoped.filter((p) => p._phase === "ONGOING");
-  const done = dimScoped.filter((p) => p._phase === "COMPLETED");
-  const soon7 = dimScoped.filter((p) => p._phase === "UPCOMING" && p._days <= 7);
-  const gapsActive = dimScoped.filter((p) => p._phase !== "COMPLETED" && Number(p.original_forecast_total || 0) > 0)
-    .map((p) => (effectiveTrade(p) - Number(p.original_forecast_total)) / Number(p.original_forecast_total) * 100);
-  const avgGap = gapsActive.length ? Math.round(gapsActive.reduce((a, x) => a + x, 0) / gapsActive.length) : null;
-
-  const cnt = { all: dimScoped.length, awaiting: awaiting.length, locked: locked.length, ongoing: live.length, completed: done.length };
+  const cnt = { all: dimScoped.length,
+    awaiting: dimScoped.filter((p) => promoDecisionStatus(p) === "awaiting").length,
+    locked: dimScoped.filter((p) => promoDecisionStatus(p) === "locked").length,
+    ongoing: dimScoped.filter((p) => p._phase === "ONGOING").length,
+    completed: dimScoped.filter((p) => p._phase === "COMPLETED").length };
   const statusChips = `<div class="chip-group">${STATUS_CHIPS.map(([k, lbl]) =>
     `<button class="${F.status === k ? "active" + (k === "awaiting" ? " awaiting" : "") : ""}" data-status="${k}">${lbl} <span class="chip-cnt">${cnt[k]}</span></button>`).join("")}</div>`;
-
-  const dtile = (val, lbl, accent, filterKind) =>
-    `<div class="kpi-d ${filterKind ? "clickable" : ""}" ${filterKind ? `data-kpifilter="${filterKind}"` : ""}>
-      <div class="k-accent" style="background:${accent}"></div>
-      <div class="k-lbl">${lbl}</div><div class="k-val">${val}</div></div>`;
-  const arrow = avgGap == null || avgGap === 0 ? "" : (avgGap > 0 ? ` <span class="arrow" style="color:var(--role-agreement)">▲</span>` : ` <span class="arrow" style="color:var(--state-bad)">▼</span>`);
-  const kpis = `<div class="kpi-d-grid section">
-    ${dtile(String(awaiting.length), "דורשים החלטה", "var(--action)", "awaiting")}
-    ${dtile(String(locked.length), "נעולים", "var(--role-approved)", "locked")}
-    ${dtile(avgGap == null ? "—" : (avgGap > 0 ? "+" : "") + avgGap + "%" + arrow, "פער ממוצע מול מקורי", "var(--role-agreement)")}
-    ${dtile(String(soon7.length), "מתחילים תוך 7 ימים", "var(--state-warn)")}
-    ${dtile(String(live.length), "פעילים כעת", "var(--state-info)", "ongoing")}
-  </div>`;
 
   const tree = buildPromoTree(allocs, pmap);
   sortPromoTree(tree);
@@ -835,20 +816,21 @@ function renderPromo() {
   const dInput = (key, lbl) => `<label class="date-filt"><span>${esc(lbl)}</span><input type="date" class="select" data-pf="${key}" value="${esc(F[key] || "")}" /></label>`;
 
   root.innerHTML = `
-    ${kpis}
-    <div class="filters section" style="flex-wrap:wrap">${statusChips}</div>
-    <div class="filters">
-      ${combo("format", "פורמט")}
-      ${combo("vendor", "ספק")}
-      ${combo("display", "אמצעי תצוגה")}
-      ${combo("category", "היררכיה")}
-      ${combo("item", "פריט")}
-      ${combo("ptype", "סוג מבצע")}
-      ${combo("wh", "מחסן")}
-    </div>
-    <div class="filters" style="align-items:flex-end">
-      ${dInput("startFrom", "תחילת מבצע — מתאריך")}
-      ${dInput("startTo", "תחילת מבצע — עד תאריך")}
+    <div class="filter-bar section">
+      <div class="filters" style="flex-wrap:wrap">${statusChips}</div>
+      <div class="filters">
+        ${combo("format", "פורמט")}
+        ${combo("vendor", "ספק")}
+        ${combo("display", "אמצעי תצוגה")}
+        ${combo("category", "היררכיה")}
+        ${combo("item", "פריט")}
+        ${combo("ptype", "סוג מבצע")}
+        ${combo("wh", "מחסן")}
+      </div>
+      <div class="filters" style="align-items:flex-end">
+        ${dInput("startFrom", "תחילת מבצע — מתאריך")}
+        ${dInput("startTo", "תחילת מבצע — עד תאריך")}
+      </div>
     </div>
     <div class="section table-wrap"><table class="data promo-tree"><thead>${header}</thead><tbody>${treeRows || `<tr><td colspan="6"><div class="empty">אין מבצעים בהיקף הנבחר</div></td></tr>`}</tbody></table></div>`;
 }
@@ -1044,7 +1026,7 @@ function drillAgg(rows) {
   return { o, r, ord, s, fq: fqAcc(s, o), adopt: r > 0 ? cap100(Math.round(ord / r * 100)) : null };
 }
 function drillRow(depth, toggleId, exp, hasChildren, label, m) {
-  const chev = hasChildren ? `<span class="tree-chev">${exp ? "▾" : "▸"}</span>` : `<span class="tree-chev" style="background:transparent;border-color:transparent"></span>`;
+  const chev = hasChildren ? chevronSVG(exp) : `<span class="tree-chev-sp"></span>`;
   const attr = toggleId ? `data-ptree="${esc(toggleId)}" class="clickable"` : "";
   return `<tr ${attr}><td style="padding-inline-start:${depth * 18 + 12}px">${chev}${label}</td>
     <td class="num">${roleNum(m.o, "provider")}</td><td class="num">${num(m.r)}</td><td class="num">${num(m.ord)}</td><td class="num">${m.s ? num(m.s) : "—"}</td>
@@ -1140,9 +1122,9 @@ function decisionRuler(m) {
 function trioCard(role, lblEn, lblHe, value, sub, editable) {
   const color = `var(--role-${role})`;
   return `<div class="trio-card ${editable ? "editable" : ""}"><div class="t-accent" style="background:${color}"></div>
-    ${editable ? `<span class="t-edit">ניתן לעריכה</span>` : ""}
-    <div class="t-lbl-en">${lblEn}</div><div class="t-lbl-he">${lblHe}</div>
-    <div class="trio-val" style="color:${color}" dir="ltr">${num(value)}</div><div class="t-sub">${sub}</div></div>`;
+    <div class="t-head"><span class="t-lbl-en">${lblEn}</span>${editable ? `<span class="t-edit">ניתן לעריכה</span>` : ""}</div>
+    <div class="t-lbl-he">${lblHe}</div>
+    <div class="trio-val" style="color:${color}"><span dir="ltr">${num(value)}</span></div><div class="t-sub">${sub}</div></div>`;
 }
 function decSub(p) {
   const dec = getDecision(p.promo_id);
@@ -1329,6 +1311,286 @@ async function renderPromoDetailPage(pid, view) {
   drawPromoDetail(p, det, view);
 }
 
+/* ============================================================
+   ACES (אסים) — last-minute deep-discount promotions
+   Created/edited client-side; price is a planning lever that slides the
+   forecast between four strength levels.
+   ============================================================ */
+const ACE_STR = [
+  { cls: "MEDIUM", label: "בינוני", mult: 0.7 },
+  { cls: "STRONG", label: "חזק", mult: 1.0 },
+  { cls: "DEEP", label: "עמוק", mult: 1.25 },
+  { cls: "VERY_DEEP", label: "עמוק מאוד", mult: 1.6 },
+];
+const ACE_MAX_DISCOUNT = 0.5;
+const ACE_STATUS_HE = { draft: "טיוטה", locked: "נעול לתכנון", linked: "מקושר למבצע" };
+function loadAces() { try { return JSON.parse(localStorage.getItem("cp_aces") || "[]"); } catch (e) { return []; } }
+function saveAces() { localStorage.setItem("cp_aces", JSON.stringify(state._aces || [])); }
+function getAce(id) { return (state._aces || []).find((a) => a.id === id) || null; }
+function upsertAce(a) { state._aces = state._aces || []; const i = state._aces.findIndex((x) => x.id === a.id); if (i >= 0) state._aces[i] = a; else state._aces.unshift(a); saveAces(); }
+function aceStatus(a) { return a.linked_promo_id ? "linked" : a.locked ? "locked" : "draft"; }
+const aceItemName = (bc) => (LK.items[bc] && LK.items[bc].description) || bc;
+function groupLeader(gc) {
+  const g = ((state._master && state._master.item_groups) || []).find((x) => x.group_code === gc);
+  if (g && g.leader_barcode) return g.leader_barcode;
+  const it = ((state._master && state._master.items) || []).find((i) => i.item_group_code === gc);
+  return it ? it.barcode : null;
+}
+function formatStoreCount(fmt) { return ((state._master && state._master.stores) || []).filter((s) => s.format_code === fmt).length || 30; }
+function itemCatalogPrice(bc) {
+  if (!bc) return 0;
+  const p = ((state._promo && state._promo.promotions) || []).find((x) => x.representing_barcode === bc && x.catalog_price != null);
+  if (p) return Number(p.catalog_price);
+  return Math.round((6 + 24 * hashFrac("cp#" + bc)) * 10) / 10;
+}
+function aceBaseQty(a) {
+  const key = a.item_barcode || (a.group_code ? groupLeader(a.group_code) : "");
+  if (!key || !a.format_code) return 0;
+  const per = 70 + 260 * hashFrac("ace#" + key + "#" + (a.display_type_code || ""));
+  return Math.round(formatStoreCount(a.format_code) * per / 10) * 10;
+}
+// price <-> strength: catalog price => MEDIUM (×0.7); deepest discount => VERY_DEEP (×1.6)
+function aceCompute(a) {
+  const bc = a.item_barcode || (a.group_code ? groupLeader(a.group_code) : "");
+  const catalog = itemCatalogPrice(bc);
+  const minPrice = Math.round(catalog * (1 - ACE_MAX_DISCOUNT) * 10) / 10;
+  let price = a.price != null && a.price !== "" ? Number(a.price) : catalog;
+  if (catalog > 0) price = Math.max(minPrice, Math.min(catalog, price));
+  const disc = catalog > 0 ? (catalog - price) / catalog : 0;
+  const t = Math.max(0, Math.min(1, disc / ACE_MAX_DISCOUNT));
+  const mult = 0.7 + t * 0.9;
+  const base = aceBaseQty(a);
+  const strengths = ACE_STR.map((s) => ({ ...s, price: Math.round(catalog * (1 - ((s.mult - 0.7) / 0.9) * ACE_MAX_DISCOUNT) * 10) / 10, qty: Math.round(base * s.mult) }));
+  let current = strengths[0];
+  strengths.forEach((s) => { if (Math.abs(s.mult - mult) < Math.abs(current.mult - mult)) current = s; });
+  return { catalog, minPrice, price, disc, discPct: Math.round(disc * 100), mult, base, qty: Math.round(base * mult), strengths, current };
+}
+function aceTargetName(a) {
+  if (a.item_barcode) return aceItemName(a.item_barcode);
+  if (a.group_code) { const g = ((state._master && state._master.item_groups) || []).find((x) => x.group_code === a.group_code); return "מקבץ · " + (g ? g.description : a.group_code); }
+  return "—";
+}
+function aceMissing(a) {
+  const miss = [];
+  if (!a.name) miss.push("שם");
+  if (!a.format_code) miss.push("פורמט");
+  if (!a.vendor_id) miss.push("ספק");
+  if (!a.display_type_code) miss.push("אמצעי תצוגה");
+  if (!a.item_barcode && !a.group_code) miss.push("פריט/מקבץ");
+  if (!a.start_date) miss.push("תאריך התחלה");
+  return miss;
+}
+
+PAGES.aces = async () => {
+  const d = await load("/api/promotions"); if (d) state._promo = d;
+  state._aces = loadAces();
+  return `<div id="aces-root"></div>`;
+};
+PAGES.aces.after = () => {
+  const root = document.getElementById("aces-root"); if (!root) return;
+  root.addEventListener("click", (e) => {
+    if (e.target.closest("[data-acenew]")) { navigate("aces/new"); return; }
+    const op = e.target.closest("[data-aceopen]"); if (op) { navigate("aces/" + op.dataset.aceopen); return; }
+  });
+  renderAcesList();
+};
+function renderAcesList() {
+  const root = document.getElementById("aces-root"); if (!root) return;
+  const aces = state._aces || [];
+  const pill = (st) => `<span class="dec-pill ${st === "draft" ? "closed" : st === "linked" ? "change_requested" : "locked"}">${ACE_STATUS_HE[st]}</span>`;
+  const rows = aces.map((a) => {
+    const c = aceCompute(a), st = aceStatus(a);
+    return `<tr class="clickable" data-aceopen="${esc(a.id)}">
+      <td><span dir="auto" class="strong">${esc(a.name || "(ללא שם)")}</span></td>
+      <td><span dir="auto">${esc(aceTargetName(a))}</span></td>
+      <td><span dir="auto">${esc(a.vendor_id ? (LK.vendors[a.vendor_id] || a.vendor_id) : "—")}</span> · ${esc(a.display_type_code ? displayName(a.display_type_code) : "—")}</td>
+      <td>${a.start_date ? sdate(a.start_date) : "—"}</td>
+      <td><span class="badge gray">${esc(c.current.label)}</span></td>
+      <td class="num">${a.item_barcode || a.group_code ? roleNum(c.qty, "agreement") : "—"}</td>
+      <td>${pill(st)}</td>
+      <td>${a.linked_promo_id ? `<span class="badge violet">${esc(a.linked_promo_id)}</span>` : "—"}</td></tr>`;
+  }).join("");
+  root.innerHTML = `
+    <div class="ace-top">
+      <div class="card-sub" style="margin:0">תכנון מבצעי אסים: יצירה, בחירת רמת חוזק, תמחור וקישור למבצע שוטף.</div>
+      <button class="btn btn-primary" style="width:auto" data-acenew>+ אס חדש</button>
+    </div>
+    ${aces.length ? `<div class="section table-wrap"><table class="data"><thead><tr><th>שם האס</th><th>פריט / מקבץ</th><th>ספק · תצוגה</th><th>התחלה</th><th>חוזק</th><th class="num">חיזוי</th><th>סטטוס</th><th>מקושר</th></tr></thead><tbody>${rows}</tbody></table></div>`
+      : `<div class="empty" style="margin-top:24px">אין אסים עדיין — לחץ "אס חדש" כדי לתכנן את הראשון.</div>`}`;
+}
+
+async function renderAceEditor(id, view) {
+  if (!state._promo) { const d = await load("/api/promotions"); if (d) state._promo = d; }
+  state._aces = loadAces();
+  let a;
+  if (id === "new") {
+    a = { id: "ACE-" + Date.now().toString(36), name: "", format_code: "", vendor_id: "", display_type_code: "",
+      target: "item", item_barcode: "", group_code: "", start_date: promoNowPlus(1), end_date: "",
+      trade_agreement: "", price: null, locked: false, linked_promo_id: "", by: state.user || "admin" };
+    state._aceIsNew = true;
+  } else {
+    a = getAce(id);
+    if (!a) { view.innerHTML = `<div class="empty">אס ${esc(id)} לא נמצא — <a class="linkish" data-route="aces" style="cursor:pointer">חזרה לרשימה</a></div>`;
+      view.querySelectorAll("[data-route]").forEach((el) => el.addEventListener("click", () => navigate(el.dataset.route))); return; }
+    state._aceIsNew = false;
+  }
+  state._aceDraft = JSON.parse(JSON.stringify(a));
+  drawAceEditor(view);
+}
+function aceField(label, must, inner) {
+  return `<label class="fld"><span>${label}${must ? ` <i>*</i>` : ""}</span>${inner}</label>`;
+}
+function aceSelect(key, val, options) {
+  return `<select class="select" data-acef="${key}"><option value="">—</option>${options.map(([v, t]) => `<option value="${esc(v)}" ${val === v ? "selected" : ""}>${esc(t)}</option>`).join("")}</select>`;
+}
+function linkCandidates(a) {
+  if (!a.item_barcode || !a.start_date) return [];
+  return ((state._promo && state._promo.promotions) || [])
+    .filter((p) => p.activity_type === "REGULAR_UNIVERSE" && p.representing_barcode === a.item_barcode)
+    .filter((p) => Math.abs((new Date(p.start_date) - new Date(a.start_date)) / 86400000) <= 10)
+    .sort((x, y) => Math.abs(new Date(x.start_date) - new Date(a.start_date)) - Math.abs(new Date(y.start_date) - new Date(a.start_date)));
+}
+function drawAceEditor(view) {
+  const a = state._aceDraft, c = aceCompute(a), st = aceStatus(a), m = state._master || {};
+  $("#pt").textContent = a.name || "אס חדש"; $("#pc").textContent = "אסים (ACES)";
+  const stPill = `<span class="dec-pill ${st === "draft" ? "closed" : st === "linked" ? "change_requested" : "locked"}">${ACE_STATUS_HE[st]}</span>`;
+  const fmtOpts = (m.formats || []).map((f) => [f.format_code, formatName(f.format_code)]);
+  const venOpts = (m.vendors || []).map((v) => [v.vendor_id, v.name]);
+  const dispOpts = (m.display_types || []).map((x) => [x.code, x.description_he]);
+  let itemOpts = (m.items || []).filter((i) => i.barcode);
+  if (a.vendor_id) itemOpts = itemOpts.filter((i) => i.original_vendor_id === a.vendor_id);
+  const itemPairs = itemOpts.slice(0, 400).map((i) => [i.barcode, i.description]);
+  const grpPairs = (m.item_groups || []).map((g) => [g.group_code, g.description]);
+  const targetToggle = `<div class="dir-chip">
+    <button class="${a.target === "item" ? "active" : ""}" data-acetarget="item">פריט</button>
+    <button class="${a.target === "group" ? "active" : ""}" data-acetarget="group">מקבץ</button></div>`;
+  const targetField = a.target === "group"
+    ? aceSelect("group_code", a.group_code, grpPairs)
+    : aceSelect("item_barcode", a.item_barcode, itemPairs);
+  const form = `<div class="ace-form">
+    ${aceField("שם האס", true, `<input class="select" data-acef="name" value="${esc(a.name || "")}" placeholder="שם תיאורי למבצע האס">`)}
+    ${aceField("פורמט", true, aceSelect("format_code", a.format_code, fmtOpts))}
+    ${aceField("ספק", true, aceSelect("vendor_id", a.vendor_id, venOpts))}
+    ${aceField("אמצעי תצוגה", true, aceSelect("display_type_code", a.display_type_code, dispOpts))}
+    ${aceField("פריט / מקבץ", true, targetToggle + targetField)}
+    ${aceField("תאריך התחלה", true, `<input class="select" type="date" data-acef="start_date" value="${esc(a.start_date || "")}">`)}
+    ${aceField("תאריך סיום (רשות)", false, `<input class="select" type="date" data-acef="end_date" value="${esc(a.end_date || "")}">`)}
+    ${aceField("הסכם מסחרי (רשות)", false, `<input class="select" type="number" min="0" step="50" data-acef="trade_agreement" value="${esc(a.trade_agreement || "")}" placeholder="כמות מחויבת">`)}
+  </div>`;
+
+  const hasTarget = !!(a.item_barcode || a.group_code) && !!a.format_code;
+  const viz = hasTarget ? aceStrengthViz(a, c) : `<div class="empty">בחר ספק, פריט/מקבץ ופורמט כדי לתכנן חוזק ותמחור.</div>`;
+  const history = hasTarget ? aceHistory(a, c) : "";
+  const linkBlock = aceLinkSection(a, c);
+  const miss = aceMissing(a);
+
+  view.innerHTML = `<div class="pd-header">
+      <span class="pd-back" data-route="aces">← חזרה לרשימת האסים</span>
+      <h2><span dir="auto">${esc(a.name || "אס חדש")}</span> ${stPill}</h2>
+      <div class="pd-meta">${a.item_barcode || a.group_code ? `<span dir="auto">${esc(aceTargetName(a))}</span>` : "טרם הוגדר פריט"}${a.start_date ? `<span class="sep">·</span>${sdate(a.start_date)}${a.end_date ? " → " + sdate(a.end_date) : ""}` : ""}</div></div>
+    <div class="pd-zone"><div class="pd-zone-title">פרטי האס</div>${form}</div>
+    <div class="pd-zone"><div class="pd-zone-title">חוזק ותמחור</div>${viz}</div>
+    ${history ? `<div class="pd-zone"><div class="pd-zone-title">מבצעי עבר על הפריט</div>${history}</div>` : ""}
+    <div class="pd-zone"><div class="pd-zone-title">קישור למבצע שוטף</div>${linkBlock}</div>
+    <div class="ace-actions">
+      <button class="dec-btn solid" data-acesave>שמירת טיוטה</button>
+      <button class="dec-btn solid" data-acelock ${miss.length ? "disabled title='חסר: " + esc(miss.join(", ")) + "'" : ""}>נעילה לתכנון</button>
+      ${!state._aceIsNew ? `<button class="dec-btn outline" data-acedelete style="border-color:var(--state-bad);color:var(--state-bad)">מחיקה</button>` : ""}
+      ${miss.length ? `<span class="mut" style="align-self:center">חסר למילוי: ${esc(miss.join(", "))}</span>` : ""}
+    </div>`;
+  attachAceHandlers(view);
+}
+function aceStrengthViz(a, c) {
+  const btns = c.strengths.slice().reverse().map((s) =>
+    `<button class="str-btn ${c.current.cls === s.cls ? "active" : ""}" data-acestr="${s.cls}">
+      <div class="s-lbl">${s.label}</div><div class="s-qty" dir="ltr">${num(s.qty)}</div><div class="s-price" dir="ltr">${money(s.price)}</div></button>`).join("");
+  const trade = Number(a.trade_agreement || 0);
+  const vsTrade = trade > 0 ? `<span class="${c.qty >= trade ? "" : "mut"}" style="color:${c.qty >= trade ? "var(--role-approved)" : "var(--state-bad)"}">${c.qty >= trade ? "מעל" : "מתחת"} להסכם (${num(trade)})</span>` : "";
+  return `<div class="ace-viz">
+    <div class="ace-qty-big">חיזוי במחיר הנבחר: <span dir="ltr" class="role-num agreement" style="font-size:30px">${num(c.qty)}</span> <span class="mut" style="font-size:14px">יח'</span> ${vsTrade}</div>
+    <div class="str-grid">${btns}</div>
+    <div class="price-row">
+      <label>מחיר אס — ברירת מחדל = מחיר קטלוג (<span dir="ltr">${money(c.catalog)}</span>). הזזה משמאל מעמיקה את ההנחה ומגדילה את החיזוי.</label>
+      <input type="range" id="ace-price" min="${c.minPrice}" max="${c.catalog}" step="0.1" value="${c.price}">
+      <div class="price-readout"><b dir="ltr" id="ace-price-val">${money(c.price)}</b> · <span id="ace-disc-val">${c.discPct}% הנחה</span> · רמה: <span class="badge gray" id="ace-str-val">${c.current.label}</span></div>
+    </div></div>`;
+}
+function aceHistory(a, c) {
+  const bc = a.item_barcode || (a.group_code ? groupLeader(a.group_code) : "");
+  const vName = a.vendor_id ? (LK.vendors[a.vendor_id] || a.vendor_id) : "";
+  const real = ((state._promo && state._promo.promotions) || []).filter((p) => p.representing_barcode === bc)
+    .sort((x, y) => (y.start_date || "").localeCompare(x.start_date || "")).slice(0, 4)
+    .map((p) => ({ label: p.description, when: p.start_date, disc: p._disc != null ? p._disc : promoDisc(p), appr: Number(p.original_forecast_total || 0), sold: Number(p.sold_total || 0) }));
+  const rows = (real.length ? real : ACE_STR.map((s, i) => ({ label: "מבצע עבר " + (i + 1), when: promoNowPlus(-30 - i * 20), disc: [15, 25, 33, 40][i], appr: Math.round(c.base * s.mult), sold: Math.round(c.base * s.mult * jit("h" + bc + i, 0.85, 1.1)) })))
+    .map((r) => `<tr><td><span dir="auto">${esc(r.label)}</span></td><td>${r.when ? sdate(r.when) : "—"}</td><td>${r.disc != null ? r.disc + "%" : "—"}</td><td class="num">${num(r.appr)}</td><td class="num">${r.sold ? num(r.sold) : "—"}</td></tr>`).join("");
+  return `<div class="card-sub" style="margin:0 0 8px">${vName ? esc(vName) + " · " : ""}היסטוריה לפריט — עוזר לכייל את עומק ההנחה והחיזוי.</div>
+    <div class="table-wrap"><table class="data"><thead><tr><th>מבצע</th><th>תאריך</th><th>% הנחה</th><th class="num">חיזוי/בסיס</th><th class="num">נמכר</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+function aceLinkSection(a, c) {
+  if (a.linked_promo_id) {
+    const p = ((state._promo && state._promo.promotions) || []).find((x) => x.promo_id === a.linked_promo_id);
+    if (!p) return `<div class="mut">המבצע המקושר לא נמצא. <a class="linkish" data-aceunlink style="cursor:pointer">בטל קישור</a></div>`;
+    const realAppr = Number(p.original_forecast_total || 0), realTrade = effectiveTrade(p);
+    const gi = gapInfo(c.qty, realTrade);
+    return `<div class="ace-link-cmp">
+      <div class="card-sub" style="margin:0 0 10px">מקושר ל-<b>${esc(p.promo_id)}</b> — <span dir="auto">${esc(p.description)}</span> · ${sdate(p.start_date)} <a class="linkish" data-aceunlink style="cursor:pointer;margin-inline-start:8px">בטל קישור</a></div>
+      <table class="outcome"><thead><tr><th></th><th class="col-match">אס (חיזוי)</th><th class="col-request">מבצע שוטף</th></tr></thead><tbody>
+        <tr><td>חיזוי מקורי</td><td>${num(c.qty)}</td><td>${num(realAppr)}</td></tr>
+        <tr><td>הסכם מסחרי</td><td>${a.trade_agreement ? num(a.trade_agreement) : "—"}</td><td>${num(realTrade)}</td></tr>
+      </tbody></table>
+      <div style="margin-top:10px;font-size:13px">פער חיזוי האס מול ההסכם של המבצע: <b style="color:${gi && gi.pct >= 0 ? "var(--role-agreement)" : "var(--state-bad)"}">${gi ? (gi.pct > 0 ? "+" : "") + gi.pct + "%" : "—"}</b> — ${gi && gi.pct >= 0 ? "האס תומך/מחזק את המבצע." : "האס נמוך מהמבצע — לשקול העמקת הנחה."}</div></div>`;
+  }
+  const cands = linkCandidates(a);
+  return `<div class="card-sub" style="margin:0 0 8px">מבצע נוצר לרוב יום לפני תחילתו בחנויות. קשר את האס למבצע שוטף לאותו פריט הסמוך לתאריך שבחרת.</div>
+    ${cands.length ? aceSelect("linked_promo_id", "", cands.map((p) => [p.promo_id, p.description + " · " + sdate(p.start_date)]))
+      : `<div class="mut">${a.item_barcode ? "אין מבצעים שוטפים סמוכים לתאריך לאותו פריט." : "בחר פריט ותאריך כדי לראות מבצעים לקישור."}</div>`}`;
+}
+function attachAceHandlers(view) {
+  view.querySelectorAll("[data-route]").forEach((el) => el.addEventListener("click", () => navigate(el.dataset.route)));
+  view.querySelectorAll("[data-acef]").forEach((el) => el.addEventListener("change", () => {
+    const k = el.dataset.acef; state._aceDraft[k] = el.value;
+    if (k === "vendor_id") { state._aceDraft.item_barcode = ""; }
+    if (k === "linked_promo_id" && el.value) state._aceDraft.linked_promo_id = el.value;
+    drawAceEditor(view);
+  }));
+  view.querySelectorAll("[data-acetarget]").forEach((el) => el.addEventListener("click", () => {
+    state._aceDraft.target = el.dataset.acetarget;
+    if (el.dataset.acetarget === "item") state._aceDraft.group_code = ""; else state._aceDraft.item_barcode = "";
+    drawAceEditor(view);
+  }));
+  view.querySelectorAll("[data-acestr]").forEach((el) => el.addEventListener("click", () => {
+    const s = aceCompute(state._aceDraft).strengths.find((x) => x.cls === el.dataset.acestr);
+    if (s) { state._aceDraft.price = s.price; drawAceEditor(view); }
+  }));
+  const range = view.querySelector("#ace-price");
+  if (range) range.addEventListener("input", () => {
+    state._aceDraft.price = parseFloat(range.value);
+    const c = aceCompute(state._aceDraft);
+    const set = (sel, html) => { const n = view.querySelector(sel); if (n) n.innerHTML = html; };
+    set("#ace-price-val", money(c.price)); set("#ace-disc-val", c.discPct + "% הנחה"); set("#ace-str-val", c.current.label);
+    const big = view.querySelector(".ace-qty-big .role-num"); if (big) big.textContent = num(c.qty);
+    view.querySelectorAll(".str-btn").forEach((b) => b.classList.toggle("active", b.dataset.acestr === c.current.cls));
+  });
+  const unlink = view.querySelector("[data-aceunlink]");
+  if (unlink) unlink.addEventListener("click", () => { state._aceDraft.linked_promo_id = ""; drawAceEditor(view); });
+  const save = view.querySelector("[data-acesave]");
+  if (save) save.addEventListener("click", () => {
+    if (!state._aceDraft.name) { alert("נא להזין שם לאס"); return; }
+    upsertAce(state._aceDraft); navigate("aces");
+  });
+  const lock = view.querySelector("[data-acelock]");
+  if (lock) lock.addEventListener("click", () => {
+    const miss = aceMissing(state._aceDraft);
+    if (miss.length) { alert("חסר למילוי: " + miss.join(", ")); return; }
+    state._aceDraft.locked = true; upsertAce(state._aceDraft); navigate("aces");
+  });
+  const del = view.querySelector("[data-acedelete]");
+  if (del) del.addEventListener("click", () => {
+    if (!confirm("למחוק את האס לצמיתות?")) return;
+    state._aces = (state._aces || []).filter((x) => x.id !== state._aceDraft.id); saveAces(); navigate("aces");
+  });
+}
+
 const DRILL = {
   kpi: (code) => {
     const d = state.cache["/api/overview"]; if (!d) return;
@@ -1444,7 +1706,8 @@ const NAV = [
     ["central-planner", "חלוקות (Haluka)", "M4 5h16v4H4zM4 13h7v6H4zM14 13h6v6h-6z"],
   ]],
   ["מבצעים ותכנון", [
-    ["promotions", "מבצעים (שוטף + אסים)", "M3 11l18-5v12L3 14zM7 12v6"],
+    ["promotions", "מבצעים שוטפים", "M3 11l18-5v12L3 14zM7 12v6"],
+    ["aces", "אסים (ACES)", "M13 2L3 14h7l-1 8 10-12h-7z"],
     ["cannibalization", "קניבליזציה", "M6 3v6a6 6 0 0012 0V3M12 15v6"],
     ["purchase-orders", "הזמנות רכש", "M6 6h15l-2 9H8zM6 6L5 3H2M9 20a1 1 0 100-2 1 1 0 000 2zM18 20a1 1 0 100-2 1 1 0 000 2z"],
     ["master", "נתוני אב", "M12 3l9 5-9 5-9-5zM3 12l9 5 9-5M3 17l9 5 9-5"],
@@ -1455,7 +1718,8 @@ const TITLES = {
   "wh-mrp": ["MRP מחסן", "המלצות הזמנה קלאסיות מבוססות 9-BOX"],
   "store-mrp": ["MRP סניף", "המלצות הזמנה ברמת פריט מוביל"],
   "central-planner": ["חלוקות (Haluka)", "הזמנות מרוכזות לסניפים ודחיפת מלאי"],
-  promotions: ["מבצעים", "פעילות שוטפת ופעילות אסים (ACES)"],
+  promotions: ["מבצעים שוטפים", "תכנון מבצעי יוניברס"],
+  aces: ["אסים (ACES)", "תכנון מבצעי אסים — חוזק, תמחור וקישור"],
   cannibalization: ["קניבליזציה", "עצי השפעה בין פריטים מתחרים"],
   "purchase-orders": ["הזמנות רכש", "STO / DIRECT / WH_PURCHASE"],
   master: ["נתוני אב", "פריטים, סניפים, ספקים, מגוון ועוד"],
@@ -1523,6 +1787,10 @@ async function navigate(token) {
   try {
     if (validBase === "promotions" && sub) {
       await renderPromoDetailPage(sub, view);
+      return;
+    }
+    if (validBase === "aces" && sub) {
+      await renderAceEditor(sub, view);
       return;
     }
     const html = await PAGES[validBase]();

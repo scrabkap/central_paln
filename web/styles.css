@@ -387,10 +387,11 @@ table.data tbody tr:last-child td { border-bottom: none; }
 .trio-card .t-lbl-en { font-size: 10.5px; font-weight: 600; color: var(--text-mut);
   text-transform: uppercase; letter-spacing: .06em; }
 .trio-card .t-lbl-he { font-size: 13px; color: var(--text-dim); margin-top: 1px; }
+.trio-card .t-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .trio-val { font-size: 40px; font-weight: 700; letter-spacing: -1px; margin: 12px 0 8px; line-height: 1; }
 .trio-card .t-sub { font-size: 11.5px; color: var(--text-mut); line-height: 1.55; }
-.trio-card .t-edit { position: absolute; top: 14px; inset-inline-start: 16px; font-size: 10px;
-  color: var(--action); border: 1px solid rgba(232, 120, 61, .4); border-radius: 6px; padding: 1px 6px; }
+.trio-card .t-edit { font-size: 10px; color: var(--action); border: 1px solid rgba(232, 120, 61, .4);
+  border-radius: 6px; padding: 1px 6px; white-space: nowrap; flex: none; }
 
 /* decision ruler */
 .ruler-wrap { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius);
@@ -495,6 +496,40 @@ tr.agg:hover .tree-chev { color: var(--text); }
 .date-filt { display: inline-flex; flex-direction: column; gap: 5px; }
 .date-filt > span { font-size: 11px; color: var(--text-mut); }
 .date-filt input.select { min-width: 170px; }
+/* boxed filter segment */
+.filter-bar { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
+.filter-bar .filters { margin: 0; }
+
+/* ---------------- ACES editor ---------------- */
+.ace-top { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 6px; }
+.ace-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px 18px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
+.fld { display: flex; flex-direction: column; gap: 6px; }
+.fld > span { font-size: 11px; color: var(--text-mut); text-transform: uppercase; letter-spacing: .04em; }
+.fld > span i { color: var(--action); font-style: normal; }
+.fld .select, .fld input { width: 100%; }
+.fld .dir-chip { margin-bottom: 6px; }
+
+.ace-viz { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
+.ace-qty-big { font-size: 15px; color: var(--text-dim); margin-bottom: 14px; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.str-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.str-btn { background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 12px 10px; text-align: center; cursor: pointer; transition: border-color .12s, background .12s; }
+.str-btn:hover { border-color: var(--border-strong); }
+.str-btn.active { border-color: var(--role-agreement); background: var(--role-agreement-soft); }
+.str-btn .s-lbl { font-size: 12px; font-weight: 600; color: var(--text); }
+.str-btn .s-qty { font-size: 18px; font-weight: 700; color: var(--role-agreement); font-variant-numeric: tabular-nums; margin: 3px 0; }
+.str-btn .s-price { font-size: 11px; color: var(--text-mut); font-variant-numeric: tabular-nums; }
+.price-row { margin-top: 16px; }
+.price-row label { display: block; font-size: 12px; color: var(--text-mut); margin-bottom: 10px; }
+.price-row input[type="range"] { width: 100%; accent-color: var(--action); height: 6px; }
+.price-readout { margin-top: 8px; font-size: 13px; color: var(--text-dim); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.price-readout b { color: var(--text-strong); }
+.ace-link-cmp { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; }
+.ace-actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.ace-actions .dec-btn { padding: 11px 24px; }
+@media (max-width: 980px) { .str-grid { grid-template-columns: repeat(2, 1fr); } }
 
 /* duo (two decision cards) + inline trade-agreement editor */
 .duo { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
