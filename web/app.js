@@ -835,51 +835,306 @@ function renderPromo() {
     <div class="section table-wrap"><table class="data promo-tree"><thead>${header}</thead><tbody>${treeRows || `<tr><td colspan="6"><div class="empty">אין מבצעים בהיקף הנבחר</div></td></tr>`}</tbody></table></div>`;
 }
 
+/* ============================================================
+   CANNIBALIZATION — supply-chain decision workspace
+   ------------------------------------------------------------
+   Two living lists:
+   · by-design  (USER_PARALLEL_BY_DESIGN): high sellers supplied in
+     parallel from several vendors. Volume is preserved — the planner
+     only redistributes the share between vendors (e.g. to cover a
+     vendor shortage).
+   · competing  (VENDOR_SUGGESTED_MISTAKE): items that eat each other.
+     The forecast provider raises an alert; the planner reviews, sets
+     the cannibalization depth, and plans a gradual phase-out at the
+     store-format level (raise an item back if a vendor returns with a
+     better buying price).
+   Edits live in the session (state._canEdit) and recompute instantly.
+   ============================================================ */
+const CAN_COLORS = ["#6E8AE0", "#4FB79A", "#CBA15C", "#B07ED8", "#E0876C", "#6CC0CB"];
+const CAN_DEFAULT_RATE = 0.15;
+const CAN_BYDESIGN = "USER_PARALLEL_BY_DESIGN";
+const canStore = () => (state._canEdit = state._canEdit || {});
+const canSeeds = () => (state._canSeed = state._canSeed || {});
+
+function canInitWorking(d) {
+  const store = canStore(), seeds = canSeeds();
+  const byTree = {};
+  (d.members || []).forEach((m) => { (byTree[m.tree_id] = byTree[m.tree_id] || []).push(m); });
+  (d.trees || []).forEach((t) => {
+    if (store[t.tree_id]) return; // keep this session's edits
+    const ms = (byTree[t.tree_id] || []).map((m) => ({
+      barcode: m.item_barcode, desc: m.item_desc, vendor_id: m.vendor_id,
+      base: Number(m.baseline_forecast_qty || 0), influence: Number(m.influence_percent || 0),
+    }));
+    const w = {
+      tree_id: t.tree_id, tree_type: t.tree_type, status: t.status, notes: t.notes,
+      created_by: t.created_by, approved_by: t.approved_by, source_suggestion_id: t.source_suggestion_id || null,
+      cannibRate: t.tree_type === CAN_BYDESIGN ? 0 : CAN_DEFAULT_RATE, formats: [], members: ms,
+    };
+    store[t.tree_id] = w;
+    seeds[t.tree_id] = JSON.parse(JSON.stringify(w));
+  });
+  return store;
+}
+
+function canCompute(w) {
+  const groupBase = w.members.reduce((a, m) => a + Number(m.base || 0), 0);
+  const wSum = w.members.reduce((a, m) => a + Number(m.influence || 0), 0) || 1;
+  const rate = w.tree_type === CAN_BYDESIGN ? 0 : Math.max(0, Math.min(0.6, Number(w.cannibRate) || 0));
+  const groupAdjusted = Math.round(groupBase * (1 - rate));
+  let allocated = 0;
+  const members = w.members.map((m, i) => {
+    const share = (Number(m.influence) || 0) / wSum;
+    const adjusted = Math.round(groupAdjusted * share);
+    allocated += adjusted;
+    return { ...m, i, share, sharePct: share * 100, adjusted,
+      delta: adjusted - Number(m.base || 0), color: CAN_COLORS[i % CAN_COLORS.length] };
+  });
+  const rem = groupAdjusted - allocated; // push rounding remainder onto the largest member
+  if (rem !== 0 && members.length) {
+    const big = members.reduce((a, b) => (b.adjusted > a.adjusted ? b : a), members[0]);
+    big.adjusted += rem; big.delta = big.adjusted - Number(big.base || 0);
+  }
+  return { ...w, members, groupBase, groupAdjusted, rate, loss: groupBase - groupAdjusted, wSum };
+}
+
+function canVendors(w) {
+  const out = [];
+  w.members.forEach((m) => { const n = LK.vendors[m.vendor_id] || m.vendor_id; if (n && !out.includes(n)) out.push(n); });
+  return out.join(" · ");
+}
+function canSplit(c) {
+  return c.members.map((m) =>
+    `<span style="width:${m.sharePct}%;background:${m.color}" title="${esc(m.desc)} · ${Math.round(m.sharePct)}%"></span>`).join("");
+}
+const canDelta = (dv) => `<span style="color:${dv > 0 ? "var(--state-good)" : dv < 0 ? "var(--state-bad)" : "var(--text-mut)"}">${dv > 0 ? "+" : ""}${num(dv)}</span>`;
+
 PAGES.cannibalization = async () => {
   const d = await load("/api/cannibalization");
   if (!d) return `<div class="empty">אין נתונים</div>`;
   state._can = d;
-  const trees = d.trees || [], members = d.members || [];
-  const byTree = {};
-  members.forEach((m) => { (byTree[m.tree_id] = byTree[m.tree_id] || []).push(m); });
-  const cards = trees.map((t) => {
-    const ms = (byTree[t.tree_id] || []).slice().sort((a, b) => Number(b.influence_percent) - Number(a.influence_percent));
-    const total = ms.reduce((a, m) => a + Number(m.baseline_forecast_qty || 0), 0);
-    const rows = ms.map((m) => `<tr>
-      <td><span dir="auto">${esc(m.item_desc)}</span><div class="mut" style="font-size:11px">${esc(vendorName(m.vendor_id))}</div></td>
-      <td class="num">${num(m.baseline_forecast_qty)}</td>
-      <td style="min-width:160px"><div style="display:flex;align-items:center;gap:8px"><div class="bar" style="flex:1"><i style="width:${Number(m.influence_percent)}%"></i></div><span class="strong">${num(m.influence_percent)}%</span></div></td>
-      <td class="num strong">${num(m.adjusted_forecast_qty)}</td>
-    </tr>`).join("");
-    return `<div class="card" data-drill="tree:${esc(t.tree_id)}" style="cursor:pointer">
-      <div class="card-head">
-        <div><h3 dir="auto">${esc(t.notes || t.tree_id)}</h3><div class="card-sub" style="margin:0">${badge(t.tree_type)} ${badge(t.status)} · בסיס כולל ${num(total)}</div></div>
-      </div>
-      <div class="table-wrap"><table class="data"><thead><tr><th>פריט</th><th class="num">חיזוי בסיס</th><th>השפעה %</th><th class="num">חיזוי מתואם</th></tr></thead><tbody>${rows}</tbody></table></div>
-    </div>`;
-  }).join("");
-  const sugg = d.suggestions || [];
-  const scols = [
-    { key: "suggestion_id", label: "הצעה", render: (r) => esc(r.suggestion_id) },
-    { key: "member_descs", label: "פריטים", render: (r) => `<span dir="auto">${esc((r.member_descs || []).join(" ↔ "))}</span>` },
-    { key: "confidence", label: "ביטחון", num: true, render: (r) => pct(Math.round(Number(r.confidence) * 100)) },
-    { key: "status", label: "סטטוס", render: (r) => badge(r.status) },
-    { key: "suggested_at", label: "התקבל", render: (r) => sdate(r.suggested_at) },
-  ];
-  const pending = sugg.filter((s) => s.status === "PENDING").length;
-  const adjTotal = members.reduce((a, m) => a + Number(m.adjusted_forecast_qty || 0), 0);
+  canInitWorking(d);
+  const all = Object.keys(canStore()).map((id) => canCompute(canStore()[id]));
+  const byDesign = all.filter((t) => t.tree_type === CAN_BYDESIGN);
+  const competing = all.filter((t) => t.tree_type !== CAN_BYDESIGN);
+  const pending = (d.suggestions || []).filter((s) => s.status === "PENDING");
+  const totalAdj = all.reduce((a, t) => a + t.groupAdjusted, 0);
+
   const tiles = chipsRow([
-    ["עצי קניבליזציה", String(trees.length)],
-    ["מתוכננים (by design)", String(trees.filter((t) => t.tree_type === "USER_PARALLEL_BY_DESIGN").length)],
-    ["הצעות ממתינות", String(pending)],
-    ['סה"כ חיזוי מתואם', num(Math.round(adjTotal))],
+    ["עצי השפעה", String(all.length)],
+    ["מקבילי מתוכנן", String(byDesign.length)],
+    ["דורש בדיקה", String(competing.length + pending.length)],
+    ["חיזוי מתואם מצרפי", num(Math.round(totalAdj))],
   ]);
-  return `<div class="card-sub" style="margin-bottom:16px">עצי קניבליזציה — מתוכנן (פריטים מקבילים לשמירת נפח, למשל חלב מ-3 ספקים) או הצעת ספק החיזוי (חפיפת מגוון). מנהל שרשרת האספקה קובע את אחוז ההשפעה של כל פריט.</div>
+
+  const alert = pending.length ? `<div class="alert-band can-alert">
+    <p><b>${pending.length}</b> ${pending.length === 1 ? "התראת קניבליזציה חדשה" : "התראות קניבליזציה חדשות"} מספק החיזוי — פריטים שעלולים לכרסם זה בנפח של זה. בדוק כל זוג; אם זו חפיפה אמיתית — קבל את ההתראה ותכנן החלפה הדרגתית ברמת הפורמט.</p></div>` : "";
+
+  const bdRows = byDesign.map((t) => `<tr class="clickable" data-canopen="${esc(t.tree_id)}">
+      <td><span dir="auto" class="strong">${esc(t.notes || t.tree_id)}</span><div class="mut" style="font-size:11px">${esc(canVendors(t))}</div></td>
+      <td class="num">${t.members.length}</td>
+      <td class="num role-num provider">${num(t.groupBase)}</td>
+      <td style="min-width:150px"><div class="can-split">${canSplit(t)}</div></td>
+      <td>${badge(t.status)}</td>
+      <td><span class="badge green">נפח נשמר</span></td>
+    </tr>`).join("");
+  const bdTable = byDesign.length ? `<div class="table-wrap"><table class="data"><thead><tr>
+      <th>עץ — פריטים מקבילים</th><th class="num">פריטים</th><th class="num">נפח כולל</th><th>חלוקת השפעה בין הספקים</th><th>סטטוס</th><th>נפח</th>
+    </tr></thead><tbody>${bdRows}</tbody></table></div>` : `<div class="empty">אין עצים מתוכננים.</div>`;
+
+  const compRows = competing.map((t) => `<tr class="clickable" data-canopen="${esc(t.tree_id)}">
+      <td><span dir="auto" class="strong">${esc(t.notes || t.tree_id)}</span><div class="mut" style="font-size:11px">${esc(t.members.map((m) => m.desc).join(" ↔ "))}</div></td>
+      <td><span dir="auto" style="font-size:12px">${esc(canVendors(t))}</span></td>
+      <td class="num role-num provider">${num(t.groupBase)}</td>
+      <td class="num strong" style="color:var(--state-bad)">${t.loss > 0 ? "−" + num(t.loss) : "—"}</td>
+      <td>${badge(t.status)}</td>
+    </tr>`).join("");
+  const sgRows = pending.map((s) => `<tr>
+      <td><span class="badge amber">התראה חדשה</span></td>
+      <td><span dir="auto" class="strong">${esc((s.member_descs || []).join(" ↔ "))}</span><div class="mut" style="font-size:11px">${esc(s.suggestion_id)} · ${sdate(s.suggested_at)}</div></td>
+      <td class="num">ביטחון ${pct(Math.round(Number(s.confidence) * 100))}</td>
+      <td colspan="2"><button class="btn btn-primary" style="width:auto;padding:6px 14px" data-cansugg="${esc(s.suggestion_id)}">בדוק ותכנן ←</button></td>
+    </tr>`).join("");
+  const compTable = (competing.length || pending.length) ? `<div class="table-wrap"><table class="data"><thead><tr>
+      <th>עץ / התראה</th><th>ספקים מתחרים</th><th class="num">נפח כולל</th><th class="num">נגרע לחפיפה</th><th>סטטוס</th>
+    </tr></thead><tbody>${compRows}${sgRows}</tbody></table></div>` : `<div class="empty">אין התראות קניבליזציה פתוחות.</div>`;
+
+  return `<div id="can-root">
+    <div class="card-sub" style="margin-bottom:16px">ניהול חיזוי בין פריטים שחיים יחד. <b>מקבילי מתוכנן</b> — רבי-מכר המסופקים במקביל מכמה ספקים: הנפח נשמר ואתה מאזן ביניהם (למשל בעת מחסור אצל ספק). <b>מתחרים</b> — פריטים שמכרסמים זה בזה: ספק החיזוי מתריע, ואתה מחליט ומתכנן החלפה הדרגתית.</div>
     ${tiles}
-    <div class="section row cols-2">${cards}</div>
-    <div class="section card-head"><h3>הצעות מספק החיזוי</h3><span class="count-tag">${sugg.length}</span></div>
-    ${tableHTML(scols, sugg, { drill: (r) => `sugg:${r.suggestion_id}` })}`;
+    ${alert}
+    <div class="section card-head"><h3>מקבילי מתוכנן — נפח נשמר, איזון בין הספקים</h3><span class="count-tag">${byDesign.length}</span></div>
+    ${bdTable}
+    <div class="section card-head"><h3>מתחרים — דורש בדיקה ותכנון החלפה</h3><span class="count-tag">${competing.length + pending.length}</span></div>
+    ${compTable}
+  </div>`;
 };
+PAGES.cannibalization.after = () => {
+  const root = document.getElementById("can-root"); if (!root) return;
+  root.addEventListener("click", (e) => {
+    const open = e.target.closest("[data-canopen]"); if (open) { navigate("cannibalization/" + open.dataset.canopen); return; }
+    const sg = e.target.closest("[data-cansugg]"); if (sg) { canAcceptSuggestion(sg.dataset.cansugg); }
+  });
+};
+
+function canAcceptSuggestion(sid) {
+  const s = (state._can.suggestions || []).find((x) => x.suggestion_id === sid); if (!s) return;
+  const tid = "TREE-" + sid;
+  const store = canStore(), seeds = canSeeds();
+  if (!store[tid]) {
+    const members = (s.member_barcodes || []).map((bc, i) => {
+      const it = LK.items[bc];
+      return { barcode: bc, desc: (s.member_descs && s.member_descs[i]) || (it && it.description) || bc,
+        vendor_id: it ? it.original_vendor_id : null,
+        base: Math.round(2500 + 4000 * hashFrac("canbase#" + bc)), influence: i === 0 ? 55 : 45 };
+    });
+    const w = { tree_id: tid, tree_type: "VENDOR_SUGGESTED_MISTAKE", status: "DRAFT",
+      notes: (s.member_descs || []).join(" ↔ "), created_by: "forecast.svc", approved_by: null,
+      source_suggestion_id: sid,
+      cannibRate: Math.max(0.08, Math.min(0.4, 1 - Number(s.confidence || 0.85))), formats: [], members };
+    store[tid] = w; seeds[tid] = JSON.parse(JSON.stringify(w));
+  }
+  s.status = "MERGED_INTO_TREE"; s.tree_id = tid;
+  navigate("cannibalization/" + tid);
+}
+
+async function renderCanEditor(tid, view) {
+  if (!state._can) { const d = await load("/api/cannibalization"); if (d) state._can = d; }
+  if (state._can) canInitWorking(state._can);
+  if (!canStore()[tid]) {
+    view.innerHTML = `<div class="empty">העץ ${esc(tid)} לא נמצא — <a class="linkish" data-route="cannibalization" style="cursor:pointer">חזרה לרשימה</a></div>`;
+    view.querySelectorAll("[data-route]").forEach((el) => el.addEventListener("click", () => navigate(el.dataset.route)));
+    return;
+  }
+  state._canTid = tid;
+  drawCanEditor(view);
+}
+
+function drawCanEditor(view) {
+  const w = canStore()[state._canTid], c = canCompute(w);
+  const isBD = w.tree_type === CAN_BYDESIGN;
+  $("#pt").textContent = w.notes || w.tree_id; $("#pc").textContent = "קניבליזציה";
+  const typePill = isBD ? `<span class="dec-pill matched">מקבילי מתוכנן</span>` : `<span class="dec-pill awaiting">קניבליזציה מתחרה</span>`;
+  const statusPill = w.status === "APPROVED" ? `<span class="dec-pill accepted">מאושר</span>` : `<span class="dec-pill change_requested">טיוטה</span>`;
+
+  const memRows = c.members.map((m) => `<tr>
+    <td><div class="can-mem"><span class="sw" style="background:${m.color}"></span><div><span dir="auto" class="strong">${esc(m.desc)}</span><div class="mut" style="font-size:11px">${esc(LK.vendors[m.vendor_id] || m.vendor_id || "—")} · <span class="num">${esc(m.barcode)}</span></div></div></div></td>
+    <td class="num role-num provider">${num(m.base)}</td>
+    <td><div class="can-slider-row"><input type="range" min="0" max="100" value="${Math.round(m.influence)}" data-canw="${m.i}"><span class="can-share-val" id="can-share-${m.i}">${Math.round(m.sharePct)}%</span></div></td>
+    <td class="num role-num approved" id="can-adj-${m.i}">${num(m.adjusted)}</td>
+    <td class="num" id="can-delta-${m.i}">${canDelta(m.delta)}</td>
+  </tr>`).join("");
+
+  const editor = `<div class="card-head" style="margin-top:2px"><div><h3>חלוקת השפעה בין הפריטים</h3>
+      <div class="card-sub" style="margin:0">גרור את ההשפעה לשינוי חלוקת החיזוי — הכל מתעדכן מיידית.${isBD ? " הנפח הכולל נשמר; אתה רק מעביר נפח בין הספקים." : ""}</div></div>
+      <button class="btn btn-ghost" style="width:auto" data-canequal>⚖ חלוקה שווה</button></div>
+    <div class="can-split" id="can-split-preview" style="height:12px;margin:2px 0 14px">${canSplit(c)}</div>
+    <div class="table-wrap"><table class="data can-members"><thead><tr>
+      <th>פריט · ספק</th><th class="num">חיזוי בסיס</th><th>השפעה (חלק בקבוצה)</th><th class="num">חיזוי מתואם</th><th class="num">דלתא מול בסיס</th>
+    </tr></thead><tbody>${memRows}</tbody><tfoot><tr>
+      <td class="strong">סה"כ</td><td class="num role-num provider">${num(c.groupBase)}</td><td></td>
+      <td class="num role-num approved" id="can-group-adj">${num(c.groupAdjusted)}</td>
+      <td class="num strong" id="can-group-loss" style="color:var(--state-bad)">${c.loss > 0 ? "−" + num(c.loss) : "—"}</td>
+    </tr></tfoot></table></div>`;
+
+  const fmts = (state._master && state._master.formats) || [];
+  const fmtChips = fmts.map((f) => `<span class="can-fmt ${w.formats.includes(f.format_code) ? "on" : ""}" data-canfmt="${esc(f.format_code)}">${esc(f.description)}</span>`).join("");
+  const replaceZone = isBD ? "" : `<div class="pd-zone"><div class="pd-zone-title">תכנון החלפה הדרגתית</div>
+    <div class="can-rate-wrap">
+      <p class="mut" style="margin:0;font-size:13px;line-height:1.75">הפריטים מתחרים ומכרסמים זה בנפח של זה. <b style="color:var(--text)">הורד את ההשפעה</b> של הפריט שברצונך להוציא — החיזוי שלו יירד, ומלאי המחסן והסניפים יתרוקן בהדרגה עד שיוחלף בפריט המתחרה. אם בעתיד ספק יחזור עם מחיר קנייה טוב יותר — <b style="color:var(--text)">העלה את ההשפעה</b> בחזרה וקבל אותו מחדש לתמהיל.</p>
+      <label class="can-lbl">עומק קניבליזציה — חלק מהביקוש המשותף שנגרע עקב החפיפה</label>
+      <div class="can-rate-row"><input type="range" min="0" max="50" value="${Math.round(c.rate * 100)}" data-canrate><span class="can-rate-val" id="can-rate-val">${Math.round(c.rate * 100)}%</span></div>
+      <div class="mut" style="font-size:12px">אובדן נפח נוכחי: <b id="can-rate-loss" style="color:var(--state-bad)">−${num(c.loss)}</b> מתוך ${num(c.groupBase)} בסיס.</div>
+      <label class="can-lbl" style="margin-top:16px">החל את התוכנית ברמת פורמט — היכן ההחלפה נכנסת לתוקף</label>
+      <div class="can-fmts">${fmtChips || '<span class="mut">אין פורמטים</span>'}</div>
+    </div></div>`;
+
+  const decisions = isBD
+    ? `<button class="dec-btn solid" data-cansave>שמירת חלוקה</button>
+       <button class="dec-btn outline" data-cantoggle>⇄ סמן כקניבליזציה מתחרה</button>
+       <button class="dec-btn outline" data-canreset>↺ אפס</button>`
+    : `${w.status === "APPROVED"
+        ? `<button class="dec-btn solid" data-cansave>שמירה וחישוב מחדש</button>`
+        : `<button class="dec-btn solid" data-canapprove>✓ אישור וחישוב מחדש</button><button class="dec-btn outline" data-cansave>שמירת טיוטה</button>`}
+       <button class="dec-btn outline" data-cantoggle>⇄ סמן כמתוכנן</button>
+       <button class="dec-btn outline" data-canreset>↺ אפס</button>`;
+
+  view.innerHTML = `<div class="pd-header">
+      <span class="pd-back" data-route="cannibalization">← חזרה לרשימת העצים</span>
+      <h2><span dir="auto">${esc(w.notes || w.tree_id)}</span> ${typePill} ${statusPill}</h2>
+      <div class="pd-meta"><span dir="auto">${esc(canVendors(w))}</span><span class="sep">·</span>${w.members.length} פריטים<span class="sep">·</span><span class="num">${esc(w.tree_id)}</span>${w.source_suggestion_id ? `<span class="sep">·</span>מקור: ${esc(w.source_suggestion_id)}` : ""}</div></div>
+    <div class="pd-zone"><div class="pd-zone-title">עורך החלוקה</div>${editor}</div>
+    ${replaceZone}
+    <div class="pd-zone"><div class="pd-zone-title">בריאות ההחלטה</div><div class="health-grid ace-health" id="can-health">${canHealth(c)}</div></div>
+    <div class="pd-zone"><div class="pd-zone-title">השפעה תפעולית</div>
+      <p class="mut" style="font-size:13px;line-height:1.75;margin:0">בעת אישור — המבצעים המכילים פריטים מהעץ יחושבו מחדש, ו-MRP מחסן וסניף יורצו מחדש באצווה הלילית לפי החלוקה החדשה. כל שינוי נרשם בלוג הפעילות.</p></div>
+    <div class="ace-actions">${decisions}</div>`;
+  attachCanHandlers(view);
+}
+
+function canHealth(c) {
+  const isBD = c.tree_type === CAN_BYDESIGN;
+  const tiles = [
+    { q: "נפח בסיס מצרפי", a: num(c.groupBase), cls: "neutral", calc: "סכום חיזויי הבסיס של הפריטים" },
+    { q: "חיזוי מתואם מצרפי", a: num(c.groupAdjusted), cls: "good", calc: isBD ? "שווה לבסיס · ללא אובדן" : `בסיס × (1 − ${Math.round(c.rate * 100)}%)` },
+    { q: "סך ההשפעות בקבוצה", a: "100%", cls: "good", calc: `מנורמל אוטומטית (קלט: ${Math.round(c.wSum)})` },
+    isBD
+      ? { q: "נפח נשמר?", a: "כן ✓", cls: "good", calc: "אותו נפח כולל, חלוקה אחרת בלבד" }
+      : { q: "נפח שנגרע לחפיפה", a: "−" + num(c.loss), cls: "bad", calc: `${Math.round(c.rate * 100)}% מהבסיס` },
+  ];
+  return tiles.map((t) => `<div class="health-tile"><div class="ht-q">${t.q}</div><div class="ht-a ${t.cls}">${t.a}</div><div class="ht-calc">${t.calc}</div></div>`).join("");
+}
+
+function canRefreshLive(view) {
+  const c = canCompute(canStore()[state._canTid]);
+  c.members.forEach((m) => {
+    const sp = view.querySelector("#can-share-" + m.i); if (sp) sp.textContent = Math.round(m.sharePct) + "%";
+    const aj = view.querySelector("#can-adj-" + m.i); if (aj) aj.textContent = num(m.adjusted);
+    const dl = view.querySelector("#can-delta-" + m.i); if (dl) dl.innerHTML = canDelta(m.delta);
+  });
+  const sp = view.querySelector("#can-split-preview"); if (sp) sp.innerHTML = canSplit(c);
+  const ga = view.querySelector("#can-group-adj"); if (ga) ga.textContent = num(c.groupAdjusted);
+  const gl = view.querySelector("#can-group-loss"); if (gl) gl.textContent = c.loss > 0 ? "−" + num(c.loss) : "—";
+  const rl = view.querySelector("#can-rate-loss"); if (rl) rl.textContent = "−" + num(c.loss);
+  const rv = view.querySelector("#can-rate-val"); if (rv) rv.textContent = Math.round(c.rate * 100) + "%";
+  const h = view.querySelector("#can-health"); if (h) h.innerHTML = canHealth(c);
+}
+
+function attachCanHandlers(view) {
+  const w = () => canStore()[state._canTid];
+  view.querySelectorAll("[data-route]").forEach((el) => el.addEventListener("click", () => navigate(el.dataset.route)));
+  view.querySelectorAll("[data-canw]").forEach((el) => el.addEventListener("input", () => {
+    w().members[Number(el.dataset.canw)].influence = Number(el.value); canRefreshLive(view);
+  }));
+  const rate = view.querySelector("[data-canrate]");
+  if (rate) rate.addEventListener("input", () => { w().cannibRate = Number(rate.value) / 100; canRefreshLive(view); });
+  view.querySelectorAll("[data-canfmt]").forEach((el) => el.addEventListener("click", () => {
+    const f = w().formats, code = el.dataset.canfmt, idx = f.indexOf(code);
+    idx >= 0 ? f.splice(idx, 1) : f.push(code); el.classList.toggle("on");
+  }));
+  const eq = view.querySelector("[data-canequal]");
+  if (eq) eq.addEventListener("click", () => { const ms = w().members, v = Math.round(100 / ms.length); ms.forEach((m) => m.influence = v); drawCanEditor(view); });
+  const tg = view.querySelector("[data-cantoggle]");
+  if (tg) tg.addEventListener("click", () => {
+    const t = w();
+    if (t.tree_type === CAN_BYDESIGN) { t.tree_type = "VENDOR_SUGGESTED_MISTAKE"; t.cannibRate = t.cannibRate || CAN_DEFAULT_RATE; t.status = "DRAFT"; }
+    else { t.tree_type = CAN_BYDESIGN; t.cannibRate = 0; }
+    drawCanEditor(view);
+  });
+  const rs = view.querySelector("[data-canreset]");
+  if (rs) rs.addEventListener("click", () => { const seed = canSeeds()[state._canTid]; if (seed) canStore()[state._canTid] = JSON.parse(JSON.stringify(seed)); drawCanEditor(view); });
+  const sv = view.querySelector("[data-cansave]");
+  if (sv) sv.addEventListener("click", () => canToast(view, "נשמר בפעילות זו (סשן)"));
+  const ap = view.querySelector("[data-canapprove]");
+  if (ap) ap.addEventListener("click", () => { const t = w(); t.status = "APPROVED"; t.approved_by = state.user || "admin"; navigate("cannibalization"); });
+}
+
+function canToast(view, msg) {
+  const bar = view.querySelector(".ace-actions"); if (!bar) return;
+  let el = view.querySelector("#can-toast");
+  if (!el) { el = document.createElement("span"); el.id = "can-toast"; el.style.cssText = "align-self:center;color:var(--state-good);font-size:13px;font-weight:600"; bar.appendChild(el); }
+  el.textContent = "✓ " + msg;
+}
 
 PAGES["purchase-orders"] = async () => {
   const rows = await load("/api/purchase-orders") || [];
@@ -1700,26 +1955,6 @@ const DRILL = {
       ]) + `<h4>הקצאות לסניף-פריט (${allocs.length})</h4>` + tableHTML(cols, allocs));
   },
   promo: (pid) => { closeModal(); navigate("promotions/" + pid); },
-  tree: (tid) => {
-    const d = state._can; const t = d.trees.find((x) => x.tree_id === tid); if (!t) return;
-    const ms = d.members.filter((m) => m.tree_id === tid).sort((a, b) => Number(b.influence_percent) - Number(a.influence_percent));
-    const total = ms.reduce((a, m) => a + Number(m.baseline_forecast_qty || 0), 0);
-    const cols = [
-      { key: "item_desc", label: "פריט", render: (r) => `<span dir="auto">${esc(r.item_desc)}</span>` },
-      { key: "vendor_id", label: "ספק", render: (r) => vendorName(r.vendor_id) },
-      { key: "baseline_forecast_qty", label: "חיזוי בסיס", num: true },
-      { key: "influence_percent", label: "השפעה %", num: true, render: (r) => `<span class="strong">${num(r.influence_percent)}%</span>` },
-      { key: "adjusted_forecast_qty", label: "חיזוי מתואם", num: true, render: (r) => `<span class="strong">${num(r.adjusted_forecast_qty)}</span>` },
-    ];
-    openModal(`<span dir="auto">${esc(t.notes || t.tree_id)}</span>`, `${badge(t.tree_type)} ${badge(t.status)}`,
-      kv([["סוג עץ", badge(t.tree_type)], ["סטטוס", badge(t.status)], ["נוצר ע\"י", esc(t.created_by)], ["אושר ע\"י", t.approved_by || "—"], ["בסיס כולל", num(total)], ["מקור הצעה", t.source_suggestion_id || "—"]])
-      + `<h4>חברי העץ — חלוקת השפעה (סכום = 100%)</h4>` + tableHTML(cols, ms));
-  },
-  sugg: (sid) => {
-    const d = state._can; const s = (d.suggestions || []).find((x) => x.suggestion_id === sid); if (!s) return;
-    openModal(`הצעת קניבליזציה ${esc(s.suggestion_id)}`, badge(s.status),
-      kv([["ביטחון", pct(Math.round(Number(s.confidence) * 100))], ["ריצת ספק", esc(s.provider_run_id)], ["התקבל", sdate(s.suggested_at)], ["עץ מקושר", s.tree_id || "—"], ["פריטים", `<span dir="auto">${esc((s.member_descs || []).join(" ↔ "))}</span>`]]));
-  },
   po: (pid) => {
     const rows = state._po; const h = rows.find((r) => r.po_id === pid && r.record_type === "header"); if (!h) return;
     const lines = rows.filter((r) => r.po_id === pid && r.record_type === "line").sort((a, b) => a.line_no - b.line_no);
@@ -1847,6 +2082,10 @@ async function navigate(token) {
     }
     if (validBase === "aces" && sub) {
       await renderAceEditor(sub, view);
+      return;
+    }
+    if (validBase === "cannibalization" && sub) {
+      await renderCanEditor(sub, view);
       return;
     }
     const html = await PAGES[validBase]();
