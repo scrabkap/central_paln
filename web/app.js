@@ -997,6 +997,46 @@ function campaignAnalysis(p) {
   return { phase, days, baseDaily, sold, leftover, stockDaysAfter, boost, revCampaign, revBaseline, revUplift, overshoot, storageCost, shrinkCost, transportCost, overshootCost, verdict, vtone };
 }
 
+/* promo drill assortment tree: store -> מקבץ leader -> member barcodes
+   (standalone items render as a store+item leaf). */
+function drillAgg(rows) {
+  const o = sumOf(rows, "original_forecast_qty"), a = sumOf(rows, "approved_forecast_qty");
+  const r = sumOf(rows, "store_recommended_qty"), ord = sumOf(rows, "store_ordered_qty"), s = sumOf(rows, "sold_qty");
+  return { o, a, r, ord, s, fq: fqAcc(s, a), adopt: r > 0 ? cap100(Math.round(ord / r * 100)) : null };
+}
+function drillRow(depth, toggleId, exp, hasChildren, label, m) {
+  const chev = hasChildren ? (exp ? "▾" : "▸") : "";
+  const attr = toggleId ? `data-ptree="${esc(toggleId)}" class="clickable"` : "";
+  return `<tr ${attr}><td style="padding-inline-start:${depth * 18 + 12}px"><span style="display:inline-block;width:14px">${chev}</span> ${label}</td>
+    <td class="num">${num(m.o)}</td><td class="num">${num(m.a)}</td><td class="num">${num(m.r)}</td><td class="num">${num(m.ord)}</td><td class="num">${m.s ? num(m.s) : "—"}</td>
+    <td class="num">${m.fq == null ? "—" : `<span class="badge ${fqTone(m.fq)}">${m.fq}%</span>`}</td>
+    <td class="num">${m.adopt == null ? "—" : `<span class="badge ${adoptTone(m.adopt)}">${m.adopt}%</span>`}</td></tr>`;
+}
+const itemGroupOf = (bc) => { const it = LK.items[bc]; return it && it.item_group_code ? it.item_group_code : null; };
+function renderDrillTree(allocs) {
+  const X = state._promoDrillX || new Set();
+  const gmap = {}; ((state._master && state._master.item_groups) || []).forEach((g) => { gmap[g.group_code] = g; });
+  const itemLeaf = (depth, a) => drillRow(depth, null, false, false, `<span dir="auto">${esc(a.item_desc)}</span> <span class="mut" style="font-size:11px">${esc(a.item_barcode)}</span>`, drillAgg([a]));
+  let html = "";
+  for (const [sid, sa] of groupMap(allocs, (a) => a.store_id)) {
+    const sId = "S#" + sid, sExp = X.has(sId);
+    html += drillRow(0, sId, sExp, true, `<span class="strong" dir="auto">${esc(sa[0].store_name || storeName(sid))}</span>`, drillAgg(sa));
+    if (!sExp) continue;
+    const grouped = {}; const standalone = [];
+    sa.forEach((a) => { const g = itemGroupOf(a.item_barcode); if (g) (grouped[g] = grouped[g] || []).push(a); else standalone.push(a); });
+    for (const g of Object.keys(grouped)) {
+      const arr = grouped[g];
+      const leaderBc = (gmap[g] && gmap[g].leader_barcode) || arr[0].item_barcode;
+      const leaderDesc = (LK.items[leaderBc] && LK.items[leaderBc].description) || (gmap[g] && gmap[g].description) || g;
+      const gId = sId + "|G#" + g, gExp = X.has(gId);
+      html += drillRow(1, gId, gExp, true, `<span class="badge violet">מקבץ</span> <span dir="auto">${esc(leaderDesc)}</span> <span class="mut" style="font-size:11px">(${arr.length})</span>`, drillAgg(arr));
+      if (gExp) arr.forEach((a) => { html += itemLeaf(2, a); });
+    }
+    standalone.forEach((a) => { html += itemLeaf(1, a); });
+  }
+  return `<div class="table-wrap"><table class="data"><thead><tr><th>סניף → מקבץ/פריט → ברקוד</th><th class="num">חיזוי מקורי</th><th class="num">חיזוי מאושר</th><th class="num">המלצה</th><th class="num">הוזמן</th><th class="num">נמכר</th><th class="num">איכות</th><th class="num">אימוץ</th></tr></thead><tbody>${html}</tbody></table></div>`;
+}
+
 const DRILL = {
   kpi: (code) => {
     const d = state.cache["/api/overview"]; if (!d) return;
@@ -1118,18 +1158,11 @@ const DRILL = {
         .map((s) => ({ label: { VERY_DEEP: "עמוק מאוד", DEEP: "עמוק", STRONG: "חזק", MEDIUM: "בינוני" }[s.strength_class] || s.strength_class, value: Number(s.anchor_tec_forecast_qty), color: s.selected_by_user ? "#22c55e" : "#6366f1" }));
       body += `<h4>סולם חוזק חיזוי (ACES) — ירוק = נבחר</h4>${vbars(items)}`;
     }
-    const acols = [
-      { key: "store_name", label: "סניף", render: (r) => `<span dir="auto">${esc(r.store_name || storeName(r.store_id))}</span>` },
-      { key: "item_desc", label: "פריט", render: (r) => `<span dir="auto">${esc(r.item_desc)}</span>` },
-      { key: "original_forecast_qty", label: "חיזוי מקורי", num: true, render: (r) => num(r.original_forecast_qty) },
-      { key: "approved_forecast_qty", label: "חיזוי מאושר", num: true, render: (r) => num(r.approved_forecast_qty) },
-      { key: "store_recommended_qty", label: "המלצה", num: true, render: (r) => num(r.store_recommended_qty) },
-      { key: "store_ordered_qty", label: "הוזמן", num: true, render: (r) => num(r.store_ordered_qty) },
-      { key: "sold_qty", label: "נמכר", num: true, render: (r) => r.sold_qty ? num(r.sold_qty) : "—" },
-      { key: "_fq", label: "איכות", num: true, render: (r) => { const q = fqAcc(Number(r.sold_qty || 0), Number(r.approved_forecast_qty || 0)); return q == null ? "—" : `<span class="badge ${fqTone(q)}">${q}%</span>`; } },
-      { key: "_ad", label: "אימוץ", num: true, render: (r) => { const o = Number(r.store_ordered_qty || 0), rc = Number(r.store_recommended_qty || 0); const q = rc > 0 ? cap100(Math.round(o / rc * 100)) : null; return q == null ? "—" : `<span class="badge ${adoptTone(q)}">${q}%</span>`; } },
-    ];
-    body += `<h4>מגוון סניפי — ${num(allocs.length)} שורות (סינתזה מתוך ${num(p.store_count)} סניפים)</h4>` + tableHTML(acols, allocs.slice(0, 300));
+    state._promoDrillAllocs = allocs.slice(0, 600);
+    state._promoDrillX = new Set();
+    body += `<h4>מגוון סניפי — עץ סניף → מקבץ/פריט → ברקוד (${num(p.store_count)} סניפים)</h4>
+      <div class="card-sub" style="margin:-6px 0 8px">לחיצה על סניף לפתיחת המקבצים/פריטים שלו, ועל מקבץ לצפייה בברקודים.</div>
+      <div id="promo-drill-tree">${renderDrillTree(state._promoDrillAllocs)}</div>`;
     if (whsup.length) {
       const wcols = [
         { key: "warehouse_id", label: "מחסן", render: (r) => "מחסן " + esc(r.warehouse_id) },
@@ -1338,7 +1371,14 @@ document.addEventListener("click", (e) => {
   if (mr) mr.addEventListener("click", (e) => {
     if (e.target.closest("[data-close]")) return;
     const o = e.target.closest("[data-open]");
-    if (o) { const s = o.dataset.open; s.startsWith("promo:") ? DRILL.promo(s.slice(6)) : openAggPopup(s); }
+    if (o) { const s = o.dataset.open; s.startsWith("promo:") ? DRILL.promo(s.slice(6)) : openAggPopup(s); return; }
+    const pt = e.target.closest("[data-ptree]");
+    if (pt) {
+      const id = pt.dataset.ptree;
+      state._promoDrillX.has(id) ? state._promoDrillX.delete(id) : state._promoDrillX.add(id);
+      const c = document.querySelector("#promo-drill-tree");
+      if (c) c.innerHTML = renderDrillTree(state._promoDrillAllocs);
+    }
   });
 })();
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
