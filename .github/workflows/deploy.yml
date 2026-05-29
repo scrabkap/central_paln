@@ -4,7 +4,7 @@ name: Deploy Central Planning POC
 # Lambda -> upload SPA -> seed mock data -> invalidate CloudFront.
 on:
   push:
-    branches: [main, claude/quirky-volta-KbEEw]
+    branches: [main]
     paths:
       - infra/**
       - lambda/**
