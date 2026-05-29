@@ -629,34 +629,46 @@ def build_forecast():
 # promotions (regular + ACES)
 # --------------------------------------------------------------------------
 def build_promotions():
-    plan = (["COMPLETED"] * 150 + ["ONGOING"] * 90
-            + ["UPCOMING_SOON"] * 180 + ["UPCOMING_LATER"] * 80)
     reps = [it for it in ITEMS if not (it[4] and it[4] != it[0])]
-    for idx, phase in enumerate(plan):
-        rep = reps[idx % len(reps)]
-        bc, grp, supply = rep[0], rep[5], rep[6]
-        fmt = PROMO_FORMATS[idx % len(PROMO_FORMATS)]
-        disp = PROMO_DISPLAY_CODES[idx % len(PROMO_DISPLAY_CODES)]
-        ptype = PROMO_TYPES[idx % len(PROMO_TYPES)][0]
-        cat = round(random.uniform(5, 28), 2)
-        price = round(cat * (1 - random.choice([0.15, 0.2, 0.25, 0.3, 0.33, 0.4, 0.5])), 2)
-        start, end = _promo_dates(phase, idx)
-        members = ([m[0] for m in ITEMS if m[5] == grp] or [bc])[:3] if grp else [bc]
-        stores = _stores_for_format(fmt)
-        managing_wh = WH_OF_ITEM.get(bc) if supply == "WH" else None
-        pid = f"PROMO-{2001 + idx}"
-        agg = _alloc_block(pid, fmt, disp, ptype, members, stores, phase, start)
-        trade = round(agg["appr"] * random.choice([0.7, 0.85, 0.95, 1.15, 1.35]))
-        _write_promo(pid, "REGULAR_UNIVERSE", fmt, disp, ptype, bc, grp,
-                     cat, price, start, end, phase, agg, trade, managing_wh)
+    by_cat = {}
+    for it in reps:
+        by_cat.setdefault(it[7][0], []).append(it)
+    # smaller display pool so display types repeat within a hierarchy node
+    disp_pool = ["Z137", "Z169", "Z170", "Z190", "Z186", "Z193", "Z210", "Z240"]
+    phases = ["COMPLETED", "ONGOING", "UPCOMING_SOON", "UPCOMING_SOON", "UPCOMING_LATER", "COMPLETED"]
+    pid_n, idx = 2001, 0
+    # several promos per (format, category) -> each hierarchy node holds many promos
+    for fmt in PROMO_FORMATS:
+        for cat_items in by_cat.values():
+            if not cat_items:
+                continue
+            for k in range(6):
+                rep = cat_items[k % min(3, len(cat_items))]  # reuse items -> vendor repeats
+                bc, grp, supply = rep[0], rep[5], rep[6]
+                disp = disp_pool[(k // 2 + idx) % len(disp_pool)]
+                ptype = PROMO_TYPES[(k + idx) % len(PROMO_TYPES)][0]
+                phase = phases[(k + idx) % len(phases)]
+                cat = round(random.uniform(5, 28), 2)
+                price = round(cat * (1 - random.choice([0.15, 0.2, 0.25, 0.3, 0.33, 0.4, 0.5])), 2)
+                start, end = _promo_dates(phase, idx)
+                members = ([m[0] for m in ITEMS if m[5] == grp] or [bc])[:4] if grp else [bc]
+                stores = _stores_for_format(fmt)
+                managing_wh = WH_OF_ITEM.get(bc) if supply == "WH" else None
+                pid = f"PROMO-{pid_n}"
+                pid_n += 1
+                idx += 1
+                agg = _alloc_block(pid, fmt, disp, ptype, members, stores, phase, start)
+                trade = round(agg["appr"] * random.choice([0.7, 0.85, 0.95, 1.15, 1.35]))
+                _write_promo(pid, "REGULAR_UNIVERSE", fmt, disp, ptype, bc, grp,
+                             cat, price, start, end, phase, agg, trade, managing_wh)
 
     # ---- ACES (last-minute, price unknown, strength scale) ----
-    aces_plan = ["UPCOMING_SOON"] * 24 + ["ONGOING"] * 12 + ["COMPLETED"] * 8
+    aces_plan = ["UPCOMING_SOON"] * 22 + ["ONGOING"] * 10 + ["COMPLETED"] * 6
     for j, phase in enumerate(aces_plan):
         rep = reps[(j + 2) % len(reps)]
         bc, grp, supply = rep[0], rep[5], rep[6]
         fmt = PROMO_FORMATS[(j + 1) % len(PROMO_FORMATS)]
-        disp = PROMO_DISPLAY_CODES[(j + 3) % len(PROMO_DISPLAY_CODES)]
+        disp = disp_pool[(j + 3) % len(disp_pool)]
         start, end = _promo_dates(phase, j)
         stores = _stores_for_format(fmt)
         managing_wh = WH_OF_ITEM.get(bc) if supply == "WH" else None

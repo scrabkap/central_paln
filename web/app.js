@@ -1016,25 +1016,30 @@ const itemGroupOf = (bc) => { const it = LK.items[bc]; return it && it.item_grou
 function renderDrillTree(allocs) {
   const X = state._promoDrillX || new Set();
   const gmap = {}; ((state._master && state._master.item_groups) || []).forEach((g) => { gmap[g.group_code] = g; });
-  const itemLeaf = (depth, a) => drillRow(depth, null, false, false, `<span dir="auto">${esc(a.item_desc)}</span> <span class="mut" style="font-size:11px">${esc(a.item_barcode)}</span>`, drillAgg([a]));
-  let html = "";
-  for (const [sid, sa] of groupMap(allocs, (a) => a.store_id)) {
-    const sId = "S#" + sid, sExp = X.has(sId);
-    html += drillRow(0, sId, sExp, true, `<span class="strong" dir="auto">${esc(sa[0].store_name || storeName(sid))}</span>`, drillAgg(sa));
-    if (!sExp) continue;
-    const grouped = {}; const standalone = [];
-    sa.forEach((a) => { const g = itemGroupOf(a.item_barcode); if (g) (grouped[g] = grouped[g] || []).push(a); else standalone.push(a); });
-    for (const g of Object.keys(grouped)) {
-      const arr = grouped[g];
-      const leaderBc = (gmap[g] && gmap[g].leader_barcode) || arr[0].item_barcode;
-      const leaderDesc = (LK.items[leaderBc] && LK.items[leaderBc].description) || (gmap[g] && gmap[g].description) || g;
-      const gId = sId + "|G#" + g, gExp = X.has(gId);
-      html += drillRow(1, gId, gExp, true, `<span class="badge violet">מקבץ</span> <span dir="auto">${esc(leaderDesc)}</span> <span class="mut" style="font-size:11px">(${arr.length})</span>`, drillAgg(arr));
-      if (gExp) arr.forEach((a) => { html += itemLeaf(2, a); });
-    }
-    standalone.forEach((a) => { html += itemLeaf(1, a); });
+  // one row per (store, מקבץ-leader) or (store, standalone item)
+  const buckets = new Map();
+  for (const a of allocs) {
+    const g = itemGroupOf(a.item_barcode);
+    const key = a.store_id + "|" + (g ? "G#" + g : "I#" + a.item_barcode);
+    if (!buckets.has(key)) buckets.set(key, { key, sid: a.store_id, sname: a.store_name, group: g, rows: [] });
+    buckets.get(key).rows.push(a);
   }
-  return `<div class="table-wrap"><table class="data"><thead><tr><th>סניף → מקבץ/פריט → ברקוד</th><th class="num">חיזוי מקורי</th><th class="num">חיזוי מאושר</th><th class="num">המלצה</th><th class="num">הוזמן</th><th class="num">נמכר</th><th class="num">איכות</th><th class="num">אימוץ</th></tr></thead><tbody>${html}</tbody></table></div>`;
+  const ordered = [...buckets.values()].sort((x, y) => String(x.sid).localeCompare(String(y.sid)) || String(x.key).localeCompare(String(y.key)));
+  let html = "";
+  for (const b of ordered) {
+    const store = `<span class="strong" dir="auto">${esc(b.sname || storeName(b.sid))}</span>`;
+    if (b.group) {
+      const leaderBc = (gmap[b.group] && gmap[b.group].leader_barcode) || b.rows[0].item_barcode;
+      const leaderDesc = (LK.items[leaderBc] && LK.items[leaderBc].description) || (gmap[b.group] && gmap[b.group].description) || b.group;
+      const id = "B#" + b.key, exp = X.has(id);
+      html += drillRow(0, id, exp, true, `${store} · <span class="badge violet">מקבץ</span> <span dir="auto">${esc(leaderDesc)}</span> <span class="mut" style="font-size:11px">(${b.rows.length} ברקודים)</span>`, drillAgg(b.rows));
+      if (exp) b.rows.forEach((a) => { html += drillRow(1, null, false, false, `<span dir="auto">${esc(a.item_desc)}</span> <span class="mut" style="font-size:11px">${esc(a.item_barcode)}</span>`, drillAgg([a])); });
+    } else {
+      const a = b.rows[0];
+      html += drillRow(0, null, false, false, `${store} · <span dir="auto">${esc(a.item_desc)}</span> <span class="mut" style="font-size:11px">${esc(a.item_barcode)}</span>`, drillAgg(b.rows));
+    }
+  }
+  return `<div class="table-wrap"><table class="data"><thead><tr><th>סניף · מקבץ/פריט → ברקודים</th><th class="num">חיזוי מקורי</th><th class="num">חיזוי מאושר</th><th class="num">המלצה</th><th class="num">הוזמן</th><th class="num">נמכר</th><th class="num">איכות</th><th class="num">אימוץ</th></tr></thead><tbody>${html}</tbody></table></div>`;
 }
 
 const DRILL = {
@@ -1160,8 +1165,8 @@ const DRILL = {
     }
     state._promoDrillAllocs = allocs.slice(0, 600);
     state._promoDrillX = new Set();
-    body += `<h4>מגוון סניפי — עץ סניף → מקבץ/פריט → ברקוד (${num(p.store_count)} סניפים)</h4>
-      <div class="card-sub" style="margin:-6px 0 8px">לחיצה על סניף לפתיחת המקבצים/פריטים שלו, ועל מקבץ לצפייה בברקודים.</div>
+    body += `<h4>מגוון סניפי — סניף · מקבץ/פריט → ברקודים (${num(p.store_count)} סניפים)</h4>
+      <div class="card-sub" style="margin:-6px 0 8px">כל שורה היא סניף עם מקבץ מוביל או פריט עצמאי; לחיצה על מקבץ פותחת את הברקודים שבו.</div>
       <div id="promo-drill-tree">${renderDrillTree(state._promoDrillAllocs)}</div>`;
     if (whsup.length) {
       const wcols = [
