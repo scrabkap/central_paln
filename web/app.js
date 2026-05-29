@@ -438,12 +438,6 @@ const cap100 = (v) => v == null ? null : Math.min(100, Math.round(v));
 const fqAcc = (sold, appr) => (sold > 0 && appr > 0) ? Math.max(0, Math.round(100 - Math.abs(sold - appr) / appr * 100)) : null;
 const fqTone = (q) => q == null ? "gray" : q >= 90 ? "green" : q >= 75 ? "amber" : "red";
 const adoptTone = (q) => q == null ? "gray" : q >= 90 ? "green" : q >= 70 ? "amber" : "red";
-function promoPhaseBadge(p) {
-  const ph = p._phase || promoPhase(p);
-  if (ph === "UPCOMING") { const dd = p._days != null ? p._days : promoDays(p.start_date); return `<span class="badge blue">בעוד ${dd} ימים</span>`; }
-  if (ph === "ONGOING") return `<span class="badge green">פעיל</span>`;
-  return `<span class="badge gray">הסתיים</span>`;
-}
 const PROMO_BUCKETS = [
   ["next2w", "2 שבועות הקרובים"], ["ongoing", "פעילים"],
   ["completed", "הסתיימו"], ["all", "הכל"],
@@ -464,14 +458,108 @@ function resolvePf(key, text) {
   return o ? o.value : "";
 }
 
+/* ----- decision state (the one thing this module exists for) ----- */
+const DEC_HE = {
+  awaiting: "דורש החלטה", accepted: "אושר", matched: "הותאם להסכם",
+  change_requested: "בקשת שינוי", aligned: "תואם הסכם",
+};
+const MATCH_REASONS = [
+  "התאמה להתחייבות הספק", "צמצום סיכון עודף מלאי",
+  "ביקוש צפוי נמוך מהחיזוי", "אחר",
+];
+function loadDecisions() {
+  try { return JSON.parse(localStorage.getItem("cp_decisions") || "{}"); } catch (e) { return {}; }
+}
+function saveDecisions() { localStorage.setItem("cp_decisions", JSON.stringify(state._decisions || {})); }
+function getDecision(pid) { return (state._decisions || {})[pid] || null; }
+function setDecision(pid, dec) {
+  state._decisions = state._decisions || {};
+  if (dec === null) delete state._decisions[pid]; else state._decisions[pid] = dec;
+  saveDecisions();
+}
+function loadRevisions() {
+  try { return JSON.parse(localStorage.getItem("cp_revisions") || "[]"); } catch (e) { return []; }
+}
+function pushRevision(rec) {
+  state._revisions = state._revisions || [];
+  state._revisions.unshift(rec);
+  localStorage.setItem("cp_revisions", JSON.stringify(state._revisions));
+}
+// effective approved forecast for a promo (a logged decision can override it)
+function approvedOf(p) {
+  const dec = getDecision(p.promo_id);
+  if (dec && dec.value != null) return Number(dec.value);
+  return Number(p.approved_forecast_total || 0);
+}
+function promoDecisionStatus(p) {
+  const dec = getDecision(p.promo_id);
+  if (dec) return dec.status;
+  const ph = p._phase || promoPhase(p);
+  const appr = Number(p.approved_forecast_total || 0), trade = Number(p.trade_agreement_qty || 0);
+  if (ph !== "COMPLETED" && trade > 0 && Math.abs(appr - trade) / trade >= 0.005) return "awaiting";
+  return "aligned";
+}
+
+/* ----- deterministic synthesis (so POC numbers are stable per promo) ----- */
+function hashFrac(seed) {
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i++) { h ^= seed.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return ((h >>> 0) % 100000) / 100000;
+}
+const jit = (seed, lo, hi) => lo + (hi - lo) * hashFrac(seed);
+const vendorDeliveryRate = (p) => Math.round(jit("dlv#" + p.vendor_id + "#" + p.display_type_code, 0.93, 1.12) * 100) / 100;
+
+/* ----- role-colored number + decision pills ----- */
+const roleNum = (value, role) => `<span dir="ltr" class="role-num ${role}">${num(value)}</span>`;
+function gapInfo(approved, trade) {
+  if (!trade) return null;
+  return { frac: (approved - trade) / trade, pct: Math.round((approved - trade) / trade * 100) };
+}
+function gapCell(approved, trade) {
+  const gi = gapInfo(approved, trade);
+  if (gi === null) return `<span class="mut">—</span>`;
+  const mag = Math.min(1, Math.abs(gi.frac));
+  const w = Math.max(gi.pct === 0 ? 0 : 6, Math.round(mag * 50));
+  let dir = "gap-even";
+  if (gi.pct > 0) dir = "gap-over"; else if (gi.pct < 0) dir = "gap-under";
+  const txt = (gi.pct > 0 ? "+" : "") + gi.pct + "%";
+  return `<span class="gap-cell ${dir}"><span class="gap-bar"><i style="width:${w}%"></i></span><span class="gap-num">${txt}</span></span>`;
+}
+function lifecyclePill(p) {
+  const ph = p._phase || promoPhase(p), st = p.status;
+  let cls = "s-draft", lbl = STATUS_HE[st] || st;
+  if (ph === "ONGOING") { cls = "s-live"; lbl = "פעיל"; }
+  else if (ph === "COMPLETED") { cls = "s-done"; lbl = "הסתיים"; }
+  else if (st === "WAITING_QC") { cls = "s-qc"; lbl = "ממתין לבקרה"; }
+  else if (st === "WAITING_DISTRIBUTION") { cls = "s-approved"; lbl = "מאושר"; }
+  else if (st === "DISTRIBUTED") { cls = "s-dist"; lbl = "הופץ"; }
+  return `<span class="lc-pill ${cls}">${esc(lbl)}</span>`;
+}
+const liveDayN = (p) => Math.max(1, Math.round((PROMO_NOW - new Date(p.start_date)) / 86400000) + 1);
+function startsCell(p) {
+  const ph = p._phase || promoPhase(p);
+  if (ph === "ONGOING") return `<span style="color:var(--role-actual);font-weight:600">פעיל · יום ${liveDayN(p)}</span>`;
+  if (ph === "COMPLETED") return `<span class="mut">הסתיים</span>`;
+  const dd = p._days != null ? p._days : promoDays(p.start_date);
+  return `<span style="${dd <= 7 ? "color:var(--state-warn);font-weight:600" : ""}">בעוד ${dd} ימים</span>`;
+}
+function decisionPill(p, clickable) {
+  const st = promoDecisionStatus(p);
+  const attr = clickable ? ` data-decfilter="${st === "awaiting" ? "awaiting" : "all"}"` : "";
+  return `<span class="dec-pill ${st}"${attr}>${DEC_HE[st] || st}</span>`;
+}
+
 PAGES.promotions = async () => {
   const d = await load("/api/promotions");
   if (!d) return `<div class="empty">אין נתונים</div>`;
   state._promo = d;
-  state._promoF = { bucket: "next2w", format: "", display: "", vendor: "", category: "", item: "", ptype: "", wh: "" };
+  state._promoF = state._promoF || { bucket: "next2w", decision: "all", format: "", display: "", vendor: "", category: "", item: "", ptype: "", wh: "" };
+  if (state._promoF.decision == null) state._promoF.decision = "all";
   state._promoX = new Set();
   state._promoOpts = {};
   state._approvedOverride = {};
+  state._decisions = loadDecisions();
+  state._revisions = loadRevisions();
   return `<div id="promo-root"></div>`;
 };
 PAGES.promotions.after = () => {
@@ -484,13 +572,34 @@ PAGES.promotions.after = () => {
   root.addEventListener("click", (e) => {
     const b = e.target.closest("[data-bucket]");
     if (b) { state._promoF.bucket = b.dataset.bucket; renderPromo(); return; }
+    const df = e.target.closest("[data-decfilter]");
+    if (df) { state._promoF.decision = df.dataset.decfilter; renderPromo(); return; }
+    const kf = e.target.closest("[data-kpifilter]");
+    if (kf) { applyKpiFilter(kf.dataset.kpifilter); renderPromo(); return; }
     const o = e.target.closest("[data-open]");
-    if (o) { const s = o.dataset.open; s.startsWith("promo:") ? DRILL.promo(s.slice(6)) : openAggPopup(s); return; }
+    if (o) { const s = o.dataset.open; s.startsWith("promo:") ? navigate("promotions/" + s.slice(6)) : openAggPopup(s); return; }
     const t = e.target.closest("[data-toggle]");
     if (t) { state._promoX.has(t.dataset.toggle) ? state._promoX.delete(t.dataset.toggle) : state._promoX.add(t.dataset.toggle); renderPromo(); }
   });
   renderPromo();
 };
+function applyKpiFilter(kind) {
+  const F = state._promoF;
+  if (kind === "awaiting") { F.decision = "awaiting"; F.bucket = "all"; }
+  else if (kind === "shortfall") { F.decision = "shortfall"; F.bucket = "all"; }
+  else if (kind === "soon7") { F.decision = "all"; F.bucket = "next2w"; }
+  else if (kind === "live") { F.decision = "all"; F.bucket = "ongoing"; }
+}
+function decisionFilterOk(p) {
+  const f = state._promoF.decision;
+  if (!f || f === "all") return true;
+  const st = promoDecisionStatus(p);
+  if (f === "awaiting") return st === "awaiting";
+  if (f === "decided") return st === "accepted" || st === "matched";
+  if (f === "change_requested") return st === "change_requested";
+  if (f === "shortfall") return Number(p.trade_agreement_qty || 0) > 0 && approvedOf(p) < Number(p.trade_agreement_qty || 0);
+  return true;
+}
 
 function promoScope() {
   const d = state._promo, F = state._promoF;
@@ -572,36 +681,54 @@ function aggNode(node) {
     adopt: recom > 0 ? cap100(Math.round(ord / recom * 100)) : null,
   };
 }
-function tradeWarn(m) {
-  const w = [];
-  if (m.trade > 0 && m.appr < m.trade) {
-    const gap = (m.trade - m.appr) / m.trade;
-    w.push(gap > 0.10 ? `<span class="badge red">חלש מול הסכם</span>` : `<span class="badge amber">פער קל מול הסכם</span>`);
-  }
-  if (m.adopt != null && m.adopt < 70) w.push(`<span class="badge amber">אימוץ נמוך</span>`);
-  if (m.fqRatio != null && m.fqRatio < 0.75) w.push(`<span class="badge amber">מכר מתחת לחיזוי</span>`);
-  if (m.fqRatio != null && m.fqRatio > 1.25) w.push(`<span class="badge red">מכר מעל לחיזוי</span>`);
-  return w;
+function nodeHasAwaiting(node) {
+  if (node.kind === "promo") return node.promo && promoDecisionStatus(node.promo) === "awaiting" ? 1 : 0;
+  return (node.children || []).some(nodeHasAwaiting) ? 1 : 0;
+}
+function sortPromoTree(nodes) {
+  nodes.sort((a, b) => {
+    if (a.kind === "promo" && b.kind === "promo") {
+      const aw = (promoDecisionStatus(b.promo) === "awaiting") - (promoDecisionStatus(a.promo) === "awaiting");
+      if (aw) return aw;
+      return new Date(a.promo.start_date) - new Date(b.promo.start_date);
+    }
+    const aw = nodeHasAwaiting(b) - nodeHasAwaiting(a);
+    if (aw) return aw;
+    return String(a.label).localeCompare(String(b.label), "he");
+  });
+  nodes.forEach((n) => { if (n.children) sortPromoTree(n.children); });
 }
 function renderPromoNode(node) {
   const m = aggNode(node);
   const isPromo = node.kind === "promo";
   const exp = !isPromo && state._promoX.has(node.id);
-  const warn = tradeWarn(m);
-  const override = node.kind === "format" && state._approvedOverride[node.fmt] != null;
+  const provider = m.orig, trade = m.trade;
+  const approved = isPromo ? approvedOf(node.promo) : m.appr;
   const chevron = isPromo ? `<span style="display:inline-block;width:14px"></span>`
     : `<span style="display:inline-block;width:14px">${exp ? "▾" : "▸"}</span>`;
-  const name = `<span data-open="${esc(node.open)}" style="cursor:pointer;text-decoration:underline dotted"><span dir="auto" class="${isPromo ? "" : "strong"}">${esc(node.label)}</span></span>${isPromo ? " " + promoPhaseBadge(node.promo) : ""}`;
+  const name = `<span data-open="${esc(node.open)}" style="cursor:pointer;text-decoration:underline dotted"><span dir="auto" class="${isPromo ? "" : "strong"}">${esc(node.label)}</span></span>${isPromo ? " " + lifecyclePill(node.promo) : ""}`;
   const rowAttr = isPromo ? `class="clickable"` : `data-toggle="${esc(node.id)}" class="clickable"`;
+  const pN = roleNum(provider, isPromo ? "provider" : "muted");
+  const aN = roleNum(approved, isPromo ? "approved" : "muted");
+  const tN = trade ? roleNum(trade, isPromo ? "agreement" : "muted") : `<span class="mut">—</span>`;
+  let decCell, startCell;
+  if (isPromo) {
+    decCell = decisionPill(node.promo);
+    startCell = startsCell(node.promo);
+  } else {
+    const awaiting = [...new Set(node.allocs.map((a) => a.promo_id))]
+      .filter((pid) => node.pmap[pid] && promoDecisionStatus(node.pmap[pid]) === "awaiting").length;
+    decCell = awaiting ? `<span class="dec-count" data-decfilter="awaiting">${awaiting} דורש החלטה</span>` : `<span class="mut">—</span>`;
+    startCell = `<span class="mut">—</span>`;
+  }
   const row = `<tr ${rowAttr}>
     <td style="padding-inline-start:${node.depth * 18 + 12}px">${chevron} ${name}</td>
-    <td class="num">${m.storeCount}</td><td class="num">${m.itemCount}</td><td class="num">${num(m.orig)}</td>
-    <td class="num">${num(m.appr)}${override ? ' <span class="badge violet">ידני</span>' : ""}</td>
-    <td class="num">${num(m.ord)}</td><td class="num">${m.sold ? num(m.sold) : "—"}</td>
-    <td class="num">${m.fq == null ? "—" : `<span class="badge ${fqTone(m.fq)}">${m.fq}%</span>`}</td>
-    <td class="num">${m.adopt == null ? "—" : `<span class="badge ${adoptTone(m.adopt)}">${m.adopt}%</span>`}</td>
-    <td class="num">${m.trade ? num(m.trade) : "—"}</td>
-    <td>${warn.join(" ") || "<span class='mut'>—</span>"}</td></tr>`;
+    <td class="num">${pN}</td>
+    <td class="num">${aN}</td>
+    <td class="num">${tN}</td>
+    <td class="num">${gapCell(approved, trade)}</td>
+    <td>${decCell}</td>
+    <td>${startCell}</td></tr>`;
   return row + (exp ? node.children.map(renderPromoNode).join("") : "");
 }
 
@@ -711,7 +838,7 @@ function renderPromo() {
   const root = document.getElementById("promo-root");
   if (!root) return;
   const d = state._promo, F = state._promoF;
-  const { allocs, whsup, scoped, pmap } = promoScope();
+  const { allocs, pmap } = promoScope();
 
   const regAll = (d.promo_items || []).filter((a) => pmap[a.promo_id]);
   const uniq = (arr) => [...new Set(arr)].filter((x) => x != null && x !== "");
@@ -733,42 +860,66 @@ function renderPromo() {
       <datalist id="dl-${key}">${opts.map((o) => `<option value="${esc(o.text)}"></option>`).join("")}</datalist>`;
   };
   const buckets = PROMO_BUCKETS.map(([k, lbl]) => `<button class="btn ${F.bucket === k ? "btn-primary" : "btn-ghost"}" data-bucket="${k}" style="width:auto">${lbl}</button>`).join("");
+  const DEC_CHIPS = [["all", "הכל"], ["awaiting", "דורש החלטה"], ["decided", "אושר על ידי"], ["change_requested", "ביקוש שונה"]];
+  const decChips = `<div class="chip-group">${DEC_CHIPS.map(([k, lbl]) =>
+    `<button class="${F.decision === k ? "active" + (k === "awaiting" ? " awaiting" : "") : ""}" data-decfilter="${k}">${lbl}</button>`).join("")}</div>`;
 
-  let apprT = 0;
-  for (const [f, arr] of groupMap(allocs, (a) => a.format_code)) apprT += (state._approvedOverride[f] != null ? Number(state._approvedOverride[f]) : sumOf(arr, "approved_forecast_qty"));
-  const ordT = sumOf(allocs, "store_ordered_qty"), soldT = sumOf(allocs, "sold_qty"), recomT = sumOf(allocs, "store_recommended_qty");
-  const whRecom = sumOf(whsup, "wh_recommended_qty"), whOrd = sumOf(whsup, "wh_ordered_qty");
-  const storeCnt = storeCountOf(new Set(allocs.map((a) => a.promo_id)), pmap);
-  const itemCnt = uniq(allocs.map((a) => a.item_barcode)).length;
-  const avgDisc = scoped.length ? Math.round(scoped.reduce((a, p) => a + (p._disc || 0), 0) / scoped.length) : 0;
-  const fq = fqAcc(soldT, apprT);
-  const adoptS = recomT > 0 ? cap100(Math.round(ordT / recomT * 100)) : null;
-  const adoptW = whRecom > 0 ? cap100(Math.round(whOrd / whRecom * 100)) : null;
-  const atRisk = scoped.filter((p) => Number(p.approved_forecast_total || 0) < Number(p.trade_agreement_qty || 0)).length;
-  const otif = cap100(avgOf(scoped, "otif_pct")), avail = cap100(avgOf(scoped, "availability_pct"));
-  const shrink = scoped.length ? (scoped.reduce((a, p) => a + Number(p.shrink_pct || 0), 0) / scoped.length).toFixed(1) : null;
-  const toneV = { green: "good", amber: "warn", red: "bad", gray: "border", accent: "accent" };
-  const kpi = (label, val, tone, sub) => `<div class="kpi"><div style="position:absolute;top:0;inset-inline-start:0;width:4px;height:100%;background:var(--${toneV[tone] || "accent"})"></div><div class="k-label">${label}</div><div class="k-val" style="font-size:24px">${val}</div><div class="k-meta">${sub || ""}</div></div>`;
-  const kpis = `<div class="kpi-grid">
-    ${kpi("מבצעים בהיקף", String(scoped.length), "accent", `${num(storeCnt)} סניפים · ${num(itemCnt)} פריטים`)}
-    ${kpi("% הנחה ממוצע", avgDisc + "%", "accent")}
-    ${kpi("איכות חיזוי (דיוק)", fq == null ? "—" : fq + "%", fqTone(fq), fq == null ? "טרם נמכר" : "")}
-    ${kpi("% אימוץ סניפים", adoptS == null ? "—" : adoptS + "%", adoptTone(adoptS))}
-    ${kpi("% אימוץ מחסנים", adoptW == null ? "—" : adoptW + "%", adoptTone(adoptW))}
-    ${kpi("הסכם מסחרי בסיכון", String(atRisk), atRisk ? "red" : "green", "מבצעים חלשים מול הסכם")}
-    ${kpi("% OTIF", otif == null ? "—" : otif + "%", "accent")}
-    ${kpi("% זמינות", avail == null ? "—" : avail + "%", "accent")}
-    ${kpi("% פחת", shrink == null ? "—" : shrink + "%", "accent")}
+  // ---- decision-aware KPIs: dim-filtered, but across ALL phases (not the time bucket) ----
+  const dimScoped = (d.promotions || []).filter((p) => p.activity_type === "REGULAR_UNIVERSE")
+    .map((p) => ({ ...p, _phase: promoPhase(p), _days: promoDays(p.start_date), _disc: promoDisc(p) }))
+    .filter((p) => {
+      if (F.format && p.format_code !== F.format) return false;
+      if (F.display && p.display_type_code !== F.display) return false;
+      if (F.vendor && p.vendor_id !== F.vendor) return false;
+      if (F.ptype && p.promo_type_code !== F.ptype) return false;
+      if (F.wh && (p.managing_warehouse_id || "") !== F.wh) return false;
+      if (F.item || F.category) {
+        const its = (d.promo_items || []).filter((a) => a.promo_id === p.promo_id);
+        if (F.item && !its.some((a) => a.item_barcode === F.item)) return false;
+        if (F.category && !its.some((a) => a.category_code === F.category)) return false;
+      }
+      return true;
+    });
+  const awaiting = dimScoped.filter((p) => promoDecisionStatus(p) === "awaiting");
+  const shortfall = dimScoped.filter((p) => p._phase !== "COMPLETED" && Number(p.trade_agreement_qty || 0) > 0 && approvedOf(p) < Number(p.trade_agreement_qty || 0));
+  const sumAtRisk = shortfall.reduce((a, p) => a + (Number(p.trade_agreement_qty || 0) - approvedOf(p)) * Number(p.promo_price || p.catalog_price || 0), 0);
+  const gapsActive = dimScoped.filter((p) => p._phase !== "COMPLETED" && Number(p.trade_agreement_qty || 0) > 0).map((p) => (approvedOf(p) - Number(p.trade_agreement_qty)) / Number(p.trade_agreement_qty) * 100);
+  const avgGap = gapsActive.length ? Math.round(gapsActive.reduce((a, x) => a + x, 0) / gapsActive.length) : null;
+  const soon7 = dimScoped.filter((p) => p._phase === "UPCOMING" && p._days <= 7);
+  const live = dimScoped.filter((p) => p._phase === "ONGOING");
+
+  const dtile = (val, lbl, accent, sub, filterKind) =>
+    `<div class="kpi-d ${filterKind ? "clickable" : ""}" ${filterKind ? `data-kpifilter="${filterKind}"` : ""}>
+      <div class="k-accent" style="background:${accent}"></div>
+      <div class="k-lbl">${lbl}</div><div class="k-val">${val}</div>${sub ? `<div class="k-sub">${sub}</div>` : ""}</div>`;
+  const arrow = avgGap == null ? "" : (avgGap > 0 ? `<span class="arrow" style="color:var(--role-agreement)">▲</span>` : avgGap < 0 ? `<span class="arrow" style="color:var(--state-bad)">▼</span>` : "");
+  const kpis = `<div class="kpi-d-grid section">
+    ${dtile(String(awaiting.length), "דורשים החלטה", "var(--action)", "מאושר ≠ הסכם, טרם הוחלט", "awaiting")}
+    ${dtile(money(Math.round(sumAtRisk)), "סכום בסיכון", "var(--role-agreement)", "ערך מסחרי של פערים מתחת להסכם", "shortfall")}
+    ${dtile(avgGap == null ? "—" : (avgGap > 0 ? "+" : "") + avgGap + "%" + arrow, "פער ממוצע", "var(--role-agreement)", "מאושר מול הסכם, מבצעים פעילים")}
+    ${dtile(String(soon7.length), "מתחילים תוך 7 ימים", "var(--state-warn)", "טרם הופצו", "soon7")}
+    ${dtile(String(live.length), "פעילים כעת", "var(--state-info)", "בין תאריך התחלה לסיום", "live")}
   </div>`;
 
-  const tree = buildPromoTree(allocs, pmap);
+  // ---- alert band: concrete decision call ----
+  const gap10 = dimScoped.filter((p) => { if (p._phase === "COMPLETED") return false; const gi = gapInfo(approvedOf(p), Number(p.trade_agreement_qty || 0)); return gi && Math.abs(gi.frac) >= 0.10; });
+  const gap10soon = gap10.filter((p) => p._phase === "UPCOMING" && p._days <= 7);
+  const alertBand = gap10.length ? `<div class="alert-band">
+    <p><b class="num">${gap10.length}</b> מבצעים עם פער של 10%+ בין החיזוי המאושר להסכם המסחרי. <a class="linkish" data-decfilter="awaiting">לסקירה והחלטה לפני תחילת הקמפיין.</a></p>
+    ${gap10soon.length ? `<p><b class="num">${gap10soon.length}</b> מתוכם מתחילים ב-7 הימים הקרובים — ממוינים לראש הרשימה.</p>` : ""}
+  </div>` : "";
+
+  const treeAllocs = allocs.filter((a) => decisionFilterOk(pmap[a.promo_id]));
+  const tree = buildPromoTree(treeAllocs, pmap);
+  sortPromoTree(tree);
   const treeRows = tree.map(renderPromoNode).join("");
-  const header = `<tr><th>פורמט → ספק → אמצעי תצוגה → היררכיה → מבצע</th><th class="num">סניפים</th><th class="num">פריטים</th><th class="num">חיזוי מקורי</th><th class="num">חיזוי מאושר</th><th class="num">הוזמן</th><th class="num">נמכר</th><th class="num">איכות חיזוי</th><th class="num">אימוץ</th><th class="num">הסכם מסחרי</th><th>התראה</th></tr>`;
-  const banner = F.bucket === "next2w" ? `<div class="card" style="border-color:${atRisk ? "var(--bad)" : "var(--border)"};margin-bottom:16px"><div style="display:flex;gap:24px;align-items:center;flex-wrap:wrap"><div><div class="c-val" style="font-size:26px">${scoped.length}</div><div class="c-lbl">מבצעים ב-14 הימים הקרובים — לטיפול מיידי</div></div>${atRisk ? `<div style="color:#fca5a5"><div class="c-val" style="font-size:26px">${atRisk}</div><div class="c-lbl">⚠ חלשים מול הסכם מסחרי</div></div>` : ""}<div class="mut" style="flex:1;text-align:end;min-width:200px">אגרגציה: פורמט → ספק → אמצעי תצוגה → היררכיה → מבצע · לחיצה על כל רמה לפירוט ומדדים</div></div></div>` : "";
+  const header = `<tr><th>פורמט → ספק → אמצעי תצוגה → היררכיה → מבצע</th><th class="num">חיזוי מקורי</th><th class="num">חיזוי מאושר</th><th class="num">הסכם מסחרי</th><th class="num">פער</th><th>החלטה</th><th>מתחיל</th></tr>`;
 
   root.innerHTML = `
-    <div class="card-sub" style="margin-bottom:14px">פעילות שוטפת (יוניברס) — תכנון תפעולי end-to-end: חיזוי מקורי מול מאושר, הזמנה מול המלצה (אימוץ), מכר מול חיזוי, והסכם מסחרי מול חוזק המבצע.</div>
-    <div class="filters">${buckets}</div>
+    <div class="card-sub" style="margin-bottom:14px">פעילות שוטפת (יוניברס) — מנהל שרשרת האספקה מחליט על החיזוי המאושר לכל מבצע: <b style="color:var(--role-approved)">אישור</b>, <b style="color:var(--role-agreement)">התאמה להסכם</b>, או <b style="color:var(--role-provider)">בקשת שינוי</b>. צבע מזהה את מקור המספר: <span class="role-num provider">מקורי</span> · <span class="role-num approved">מאושר</span> · <span class="role-num agreement">הסכם</span>.</div>
+    ${alertBand}
+    ${kpis}
+    <div class="filters section" style="align-items:center">${decChips}<div style="flex:1"></div>${buckets}</div>
     <div class="filters">
       ${combo("format", "פורמט — הקלד קוד/תיאור")}
       ${combo("vendor", "ספק — הקלד קוד/שם")}
@@ -778,8 +929,7 @@ function renderPromo() {
       ${combo("ptype", "סוג מבצע")}
       ${combo("wh", "מחסן מנהל")}
     </div>
-    ${banner}${kpis}
-    <div class="section table-wrap"><table class="data"><thead>${header}</thead><tbody>${treeRows || `<tr><td colspan="11"><div class="empty">אין מבצעים בהיקף הנבחר</div></td></tr>`}</tbody></table></div>`;
+    <div class="section table-wrap"><table class="data"><thead>${header}</thead><tbody>${treeRows || `<tr><td colspan="7"><div class="empty">אין מבצעים בהיקף הנבחר</div></td></tr>`}</tbody></table></div>`;
 }
 
 PAGES.cannibalization = async () => {
@@ -965,38 +1115,6 @@ async function promoDetail(pid) {
 }
 // campaign retro / forecast analysis: sales lift, leftover stock days, revenue
 // uplift, and whether the trade agreement overshoots demand (storage/shrink/transport cost).
-function campaignAnalysis(p) {
-  const phase = promoPhase(p);
-  const days = Number(p.duration_days) || Math.max(1, Math.round((new Date(p.end_date) - new Date(p.start_date)) / 86400000));
-  const base2w = Number(p.baseline_units_2w || 0), baseDaily = base2w / 14;
-  const sold = Number(p.sold_total || 0), ordered = Number(p.ordered_total || 0);
-  const appr = Number(p.approved_forecast_total || 0), orig = Number(p.original_forecast_total || 0);
-  const trade = Number(p.trade_agreement_qty || 0), unitCost = Number(p.unit_cost || 0);
-  const promoPrice = Number(p.promo_price || 0), cat = Number(p.catalog_price || promoPrice || 0);
-  const campDaily = sold > 0 ? sold / days : null;
-  const boost = (baseDaily > 0 && campDaily != null) ? Math.round((campDaily / baseDaily - 1) * 100) : null;
-  const revCampaign = (sold > 0 && promoPrice) ? sold * promoPrice : null;
-  const revBaseline = (baseDaily > 0 && cat) ? baseDaily * days * cat : null;
-  const revUplift = (revCampaign != null && revBaseline != null) ? revCampaign - revBaseline : null;
-  const supplied = ordered || trade, consumed = sold || appr;
-  const leftover = Math.max(0, supplied - consumed);
-  const stockDaysAfter = baseDaily > 0 ? Math.round(leftover / baseDaily) : null;
-  const reference = phase === "COMPLETED" ? sold : Math.max(appr, orig);
-  const overshoot = Math.max(0, trade - reference);
-  const overshootValue = overshoot * unitCost;
-  const storageCost = overshootValue * 0.0008 * (stockDaysAfter || 30);
-  const shrinkCost = overshootValue * (Number(p.shrink_pct || 2) / 100);
-  const transportCost = overshootValue * 0.03;
-  const overshootCost = Math.round(storageCost + shrinkCost + transportCost);
-  let verdict, vtone;
-  if (trade <= 0) { verdict = "אין הסכם מסחרי"; vtone = "gray"; }
-  else if (overshoot <= trade * 0.05) { verdict = "ההסכם מכוסה ע\"י הביקוש — משתלם"; vtone = "green"; }
-  else if (revUplift != null && overshootCost > Math.max(1, revUplift) * 0.6) { verdict = "ההסכם גבוה מדי — עלות העודף שוחקת את התועלת"; vtone = "red"; }
-  else if (overshoot > trade * 0.2) { verdict = "עודף משמעותי מול הביקוש — לשקול הקטנת הסכם"; vtone = "red"; }
-  else { verdict = "עודף מנוהל — לעקוב"; vtone = "amber"; }
-  return { phase, days, baseDaily, sold, leftover, stockDaysAfter, boost, revCampaign, revBaseline, revUplift, overshoot, storageCost, shrinkCost, transportCost, overshootCost, verdict, vtone };
-}
-
 /* promo drill assortment tree: store -> מקבץ leader -> member barcodes
    (standalone items render as a store+item leaf). */
 function drillAgg(rows) {
@@ -1040,6 +1158,316 @@ function renderDrillTree(allocs) {
     }
   }
   return `<div class="table-wrap"><table class="data"><thead><tr><th>סניף · מקבץ/פריט → ברקודים</th><th class="num">חיזוי מקורי</th><th class="num">חיזוי מאושר</th><th class="num">המלצה</th><th class="num">הוזמן</th><th class="num">נמכר</th><th class="num">איכות</th><th class="num">אימוץ</th></tr></thead><tbody>${html}</tbody></table></div>`;
+}
+
+/* ============================================================
+   Promotion detail — the decision canvas (routed page)
+   ============================================================ */
+const nowIso = () => new Date().toISOString();
+function addDaysIso(iso, n) { const dt = new Date(iso); dt.setDate(dt.getDate() + n); return dt.toISOString().slice(0, 10); }
+
+function promoModel(p, det) {
+  const provider = Number(p.original_forecast_total || 0);
+  const approved = approvedOf(p);
+  const agreement = Number(p.trade_agreement_qty || 0);
+  const sold = Number(p.sold_total || 0);
+  const deliveryRate = vendorDeliveryRate(p);
+  const expectedDemand = Math.round(provider * deliveryRate);
+  const phase = p._phase || promoPhase(p);
+  let actualProjected = null;
+  if (phase === "ONGOING") { const dur = Math.max(1, Number(p.duration_days) || 12); actualProjected = Math.round(sold / Math.max(1, Math.min(liveDayN(p), dur)) * dur); }
+  else if (phase === "COMPLETED") actualProjected = sold;
+  const whsup = (det && det.wh_supply) || [];
+  const whRecom = sumOf(whsup, "wh_recommended_qty") || Number(p.wh_recommended_total || 0);
+  const onHand = Math.round(whRecom * jit("oh#" + p.promo_id, 0.7, 1.05));
+  const inTransit = Math.round(whRecom * jit("it#" + p.promo_id, 0.4, 0.85));
+  const higher = Math.max(approved, agreement);
+  const whCovered = higher > 0 ? Math.round((onHand + inTransit) / higher * 100) : null;
+  return { provider, approved, agreement, sold, deliveryRate, expectedDemand, phase, actualProjected,
+    onHand, inTransit, higher, whCovered, hasWh: whsup.length > 0 || Number(p.wh_recommended_total || 0) > 0 };
+}
+function candidateCost(p, m, qty) {
+  const demand = m.expectedDemand;
+  const excessUnits = Math.max(0, qty - demand), shortUnits = Math.max(0, demand - qty);
+  const unitCost = Number(p.unit_cost || 0), promoPrice = Number(p.promo_price || p.catalog_price || 0);
+  const excessVal = excessUnits * unitCost;
+  const excessCost = Math.round(excessVal * 0.0008 * 30 + excessVal * (Number(p.shrink_pct || 2) / 100) + excessVal * 0.03);
+  return { qty, excessUnits, shortUnits, excessCost, lostSale: Math.round(shortUnits * promoPrice),
+    expectedSales: Math.round(Math.min(qty, demand)), revenue: Math.round(Math.min(qty, demand) * promoPrice),
+    coverage: m.agreement > 0 ? Math.round(qty / m.agreement * 100) : null };
+}
+
+function decisionRuler(m) {
+  const W = 900, H = 124, padX = 46, axisY = 64;
+  const vals = [m.provider, m.approved, m.agreement]; if (m.actualProjected != null) vals.push(m.actualProjected);
+  const max = Math.max(...vals, 1) * 1.1;
+  const x = (v) => padX + (v / max) * (W - 2 * padX);
+  const lo = Math.min(m.approved, m.agreement), hi = Math.max(m.approved, m.agreement);
+  const markers = [["#6B8FC9", m.provider, "חיזוי מקורי"], ["#5EBA8C", m.approved, "חיזוי מאושר"], ["#C9A36A", m.agreement, "הסכם מסחרי"]];
+  if (m.actualProjected != null) markers.push(["#9D7BC9", m.actualProjected, "תחזית מכר"]);
+  let s = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">`;
+  s += `<defs><pattern id="gapstripe" width="9" height="9" patternTransform="rotate(45)" patternUnits="userSpaceOnUse"><rect width="9" height="9" fill="rgba(201,163,106,.14)"/><line x1="0" y1="0" x2="0" y2="9" stroke="rgba(201,163,106,.5)" stroke-width="2"/></pattern></defs>`;
+  if (m.agreement > 0) s += `<rect x="${x(lo)}" y="${axisY - 15}" width="${Math.max(0, x(hi) - x(lo))}" height="30" fill="url(#gapstripe)" rx="3"/>`;
+  s += `<line x1="${padX}" y1="${axisY}" x2="${W - padX}" y2="${axisY}" stroke="#3A4258" stroke-width="2"/>`;
+  markers.forEach((mk, i) => {
+    const px = x(mk[1]), above = i % 2 === 0;
+    s += `<line x1="${px}" y1="${axisY - 17}" x2="${px}" y2="${axisY + 17}" stroke="${mk[0]}" stroke-width="3"/>`;
+    s += `<circle cx="${px}" cy="${axisY}" r="6" fill="${mk[0]}"/>`;
+    s += `<text x="${px}" y="${above ? axisY - 24 : axisY + 34}" text-anchor="middle" fill="${mk[0]}" font-size="16" font-weight="700">${num(mk[1])}</text>`;
+  });
+  s += `</svg>`;
+  const legend = markers.map((mk) => `<span><i style="background:${mk[0]}"></i>${mk[2]}</span>`).join("");
+  return `<div class="ruler-wrap">${s}<div class="r-legend">${legend}</div></div>`;
+}
+function trioCard(role, lblEn, lblHe, value, sub, editable) {
+  const color = `var(--role-${role})`;
+  return `<div class="trio-card ${editable ? "editable" : ""}"><div class="t-accent" style="background:${color}"></div>
+    ${editable ? `<span class="t-edit">ניתן לעריכה</span>` : ""}
+    <div class="t-lbl-en">${lblEn}</div><div class="t-lbl-he">${lblHe}</div>
+    <div class="trio-val" style="color:${color}" dir="ltr">${num(value)}</div><div class="t-sub">${sub}</div></div>`;
+}
+function approvedSub(p) {
+  const dec = getDecision(p.promo_id);
+  if (dec) return `${DEC_HE[dec.status] || ""} · ${dec.at ? sdate(dec.at) : ""}${dec.by ? " · " + esc(dec.by) : ""}`;
+  return "חיזוי מאושר נוכחי · לא תועדה החלטה";
+}
+function decisionBar(p, m, decStatus, dec) {
+  const locked = m.phase === "COMPLETED";
+  const chosen = (k) => (dec && dec.status === k ? "chosen" : "");
+  return `<div class="dec-bar">
+    <button class="dec-btn solid ${chosen("accepted")}" data-act="accept" ${locked ? "disabled" : ""}>✓ אשר חיזוי נוכחי<span class="db-sub" dir="ltr">${num(m.approved)}</span></button>
+    <button class="dec-btn solid ${chosen("matched")}" data-act="match" ${locked ? "disabled" : ""}>⇄ התאם להסכם<span class="db-sub" dir="ltr">${num(m.agreement)}</span></button>
+    <button class="dec-btn outline ${chosen("change_requested")}" data-act="request">📤 בקשת שינוי הסכם</button>
+  </div>${decisionStateLine(p, dec, decStatus, locked)}`;
+}
+function decisionStateLine(p, dec, decStatus, locked) {
+  if (dec) {
+    let txt = "";
+    if (dec.status === "accepted") txt = `אושר חיזוי ${num(dec.value)}`;
+    else if (dec.status === "matched") txt = `הותאם להסכם ${num(dec.value)}${dec.reason ? " · " + esc(dec.reason) : ""}`;
+    else if (dec.status === "change_requested") txt = `נשלחה בקשת שינוי ל-${num(dec.requested)} (${dec.direction === "up" ? "הגדלה" : "הקטנה"})${dec.urgency ? " · " + esc(dec.urgency) : ""}`;
+    return `<div class="dec-state">החלטה אחרונה: <b>${txt}</b>${dec.at ? " · " + sdate(dec.at) : ""}${dec.by ? " · " + esc(dec.by) : ""} &nbsp; <a class="linkish" data-act="reset" style="color:var(--text-mut)">בטל החלטה</a></div>`;
+  }
+  if (locked) return `<div class="dec-state">המבצע הסתיים — תצוגת רטרו בלבד.</div>`;
+  if (decStatus === "awaiting") return `<div class="dec-state">ממתין להחלטה · קיים פער בין החיזוי המאושר להסכם המסחרי.</div>`;
+  return `<div class="dec-state">החיזוי המאושר תואם להסכם — לא נדרשת פעולה.</div>`;
+}
+function renderDecisionPanel(p, m) {
+  const panel = state._pdPanel;
+  if (!panel || panel.pid !== p.promo_id) return "";
+  if (panel.kind === "match") {
+    return `<div class="dec-panel"><h4>התאמת החיזוי המאושר להסכם המסחרי</h4>
+      <div class="pf-row">
+        <div><label>כמות יעד (יח')</label><input class="search" id="match-qty" type="number" min="0" step="100" value="${m.agreement}" style="max-width:160px"></div>
+        <div><label>סיבה</label><select class="select" id="match-reason">${MATCH_REASONS.map((r) => `<option>${esc(r)}</option>`).join("")}</select></div>
+        <div style="flex:1;min-width:200px"><label>הערה (רשות)</label><input class="search" id="match-note" placeholder="פירוט…" style="width:100%"></div>
+      </div>
+      <div class="panel-actions"><button class="dec-btn solid" data-act="match-confirm" style="padding:10px 20px">אישור התאמה</button><button class="dec-btn outline" data-act="panel-cancel" style="padding:10px 18px;border-color:var(--border);color:var(--text-dim)">ביטול</button></div></div>`;
+  }
+  const dir = panel.direction || "down";
+  return `<div class="dec-panel"><h4>בקשת שינוי הסכם מסחרי מול מחלקת הסחר</h4>
+    <div class="pf-row">
+      <div><label>כמות מבוקשת (יח')</label><input class="search" id="req-qty" type="number" min="0" step="100" value="${panel.requested != null ? panel.requested : m.approved}" style="max-width:160px;color:var(--role-agreement);font-weight:700"></div>
+      <div><label>כיוון</label><div class="dir-chip"><button class="${dir === "up" ? "active" : ""}" data-dir="up">הגדלה ▲</button><button class="${dir === "down" ? "active" : ""}" data-dir="down">הקטנה ▼</button></div></div>
+      <div><label>דחיפות</label><select class="select" id="req-urg"><option value="רגילה">רגילה</option><option value="גבוהה">גבוהה</option><option value="דחופה">דחופה</option></select></div>
+      <div style="flex:1;min-width:200px"><label>הודעה לסחר (רשות)</label><input class="search" id="req-msg" placeholder="נימוק הבקשה…" style="width:100%"></div>
+    </div>
+    <div class="panel-actions"><button class="dec-btn solid" data-act="request-confirm" style="padding:10px 20px">שליחת בקשה</button><button class="dec-btn outline" data-act="panel-cancel" style="padding:10px 18px;border-color:var(--border);color:var(--text-dim)">ביטול</button></div></div>`;
+}
+function healthTone(kind, value, m) {
+  if (kind === "demand") return value >= m.agreement ? "good" : value >= m.agreement * 0.9 ? "warn" : "bad";
+  if (kind === "wh") return value == null ? "neutral" : value >= 110 ? "good" : value >= 95 ? "warn" : "bad";
+  return "good";
+}
+function healthZone(p, m) {
+  const pctVsAgr = m.agreement > 0 ? Math.round((m.provider - m.agreement) / m.agreement * 100) : null;
+  const t1 = healthTone("demand", m.expectedDemand, m);
+  const a1 = t1 === "good" ? "כן — סביר" : t1 === "warn" ? "גבולי" : "לא סביר";
+  const calc1 = `חיזוי מקורי ${pctVsAgr == null ? "—" : (pctVsAgr >= 0 ? "+" : "") + pctVsAgr + "%"} מול ההסכם; הספק מספק היסטורית ${Math.round(m.deliveryRate * 100)}% מהחיזוי → ביקוש צפוי ${num(m.expectedDemand)}.`;
+  let t2, a2, calc2;
+  if (!m.hasWh) { t2 = "neutral"; a2 = "אספקה ישירה"; calc2 = "המבצע באספקה ישירה לסניפים — ללא מחסן מנהל."; }
+  else { t2 = healthTone("wh", m.whCovered, m); a2 = t2 === "good" ? `כן — ${m.whCovered}% כיסוי` : t2 === "warn" ? `חלקית — ${m.whCovered}%` : `לא — ${m.whCovered}%`;
+    calc2 = `מלאי במחסן ${num(m.onHand)} + בדרך ${num(m.inTransit)} מול ${num(m.higher)} (הגבוה מבין המועמדים).`; }
+  const match = candidateCost(p, m, m.agreement);
+  const t3 = match.excessCost <= 0 ? "good" : match.excessUnits > m.agreement * 0.15 ? "bad" : "warn";
+  const a3 = match.excessCost <= 0 ? "₪0 — אין עודף" : money(match.excessCost);
+  const calc3 = `ביקוש צפוי ${num(m.expectedDemand)} מול כמות התאמה ${num(m.agreement)}; עודף ${num(match.excessUnits)} יח'.`;
+  const accept = candidateCost(p, m, m.approved);
+  const t4 = accept.lostSale <= 0 ? "good" : accept.shortUnits > m.expectedDemand * 0.1 ? "bad" : "warn";
+  const a4 = accept.lostSale <= 0 ? "נמוך" : money(accept.lostSale);
+  const calc4 = `אובדן מכירה משוער ${money(accept.lostSale)}; חוסר ${num(accept.shortUnits)} יח' מול ביקוש ${num(m.expectedDemand)}.`;
+  const tile = (q, a, t, c) => `<div class="health-tile"><div class="ht-q">${q}</div><div class="ht-a ${t}">${a}</div><div class="ht-calc">${c}</div></div>`;
+  return `<div class="health-grid">
+    ${tile("האם המכירות יגיעו לכמות ההסכם המסחרי?", a1, t1, calc1)}
+    ${tile("האם המחסן יכול לספק את הכמות הגבוהה מבין המועמדים?", a2, t2, calc2)}
+    ${tile("אם נתאים את החיזוי להסכם — מה עלות העודף?", a3, t3, calc3)}
+    ${tile("אם נאשר את החיזוי הגבוה — מה סיכון החוסר?", a4, t4, calc4)}</div>`;
+}
+function outcomeTable(p, m, requested) {
+  const cols = [["col-accept", "אם תאשר (מאושר)", candidateCost(p, m, m.approved)],
+    ["col-match", "אם תתאים (הסכם)", candidateCost(p, m, m.agreement)]];
+  if (requested != null) cols.push(["col-request", "בקשתך", candidateCost(p, m, requested)]);
+  const row = (label, fn) => `<tr><td>${label}</td>${cols.map((c) => `<td>${fn(c[2])}</td>`).join("")}</tr>`;
+  return `<table class="outcome"><thead><tr><th></th>${cols.map((c) => `<th class="${c[0]}">${c[1]}<div style="font-size:11px;font-weight:600;opacity:.85" dir="ltr">${num(c[2].qty)}</div></th>`).join("")}</tr></thead><tbody>
+    ${row("מכר צפוי", (c) => num(c.expectedSales))}
+    ${row("הכנסה צפויה (לאחר הנחה)", (c) => money(c.revenue))}
+    ${row("כיסוי הסכם", (c) => c.coverage == null ? "—" : c.coverage + "%")}
+    ${row("עלות עודף מלאי", (c) => money(c.excessCost))}
+    ${row("סיכון אובדן מכירה", (c) => money(c.lostSale))}</tbody></table>`;
+}
+function historicalComparison(p, m) {
+  const vName = LK.vendors[p.vendor_id] || p.vendor_id, dName = displayName(p.display_type_code);
+  const mk = (label, seed, base) => {
+    const appr = Math.round(base * jit(seed + "a", 0.85, 1.05));
+    const deliv = Math.round(jit(seed + "d", 0.92, 1.12) * 100);
+    return { label, appr, actual: Math.round(appr * deliv / 100), deliv,
+      outcome: deliv >= 105 ? "נמכר, ביקוש גבוה" : deliv >= 98 ? "בריא" : "ביקוש מעורב" };
+  };
+  const rows = [
+    mk("אותו קמפיין אשתקד", "ly#" + p.promo_id, m.approved),
+    mk(vName + " · " + dName + " · ממוצע 3 מבצעים", "v3#" + p.promo_id, m.approved * 0.82),
+    mk(dName + " · כל הספקים · 6 מבצעים", "d6#" + p.promo_id, m.approved * 0.7),
+  ];
+  const avgDeliv = Math.round(rows.reduce((a, r) => a + r.deliv, 0) / rows.length), over = avgDeliv >= 100;
+  const head = `<div style="font-size:13px;color:var(--text);margin-bottom:12px;line-height:1.6"><span dir="auto" class="strong">${esc(vName)}</span> ${over ? "מספק היסטורית מעל לחיזוי" : "מספק היסטורית מתחת לחיזוי"} ב-<b dir="ltr">${Math.abs(avgDeliv - 100)}%</b> בממוצע — נטייה ל<b style="color:${over ? "var(--role-approved)" : "var(--role-agreement)"}">${over ? "אישור" : "התאמה"}</b> בטוחה יותר סטטיסטית.</div>`;
+  const body = `<table class="outcome"><thead><tr><th>מבצע עבר</th><th>מאושר</th><th>בפועל</th><th>אספקה %</th><th style="text-align:start">תוצאה</th></tr></thead><tbody>
+    ${rows.map((r) => `<tr><td><span dir="auto">${esc(r.label)}</span></td><td>${num(r.appr)}</td><td>${num(r.actual)}</td><td style="color:${r.deliv >= 100 ? "var(--role-approved)" : "var(--state-warn)"}">${r.deliv}%</td><td style="text-align:start;color:var(--text-dim)">${r.outcome}</td></tr>`).join("")}</tbody></table>`;
+  return head + body;
+}
+function cumChart(labels, forecast, actual, elapsedIdx) {
+  const W = 840, H = 210, pad = { l: 46, r: 16, t: 16, b: 30 };
+  const max = Math.max(1, ...forecast, ...actual.filter((v) => v != null));
+  const n = labels.length, iw = W - pad.l - pad.r, ih = H - pad.t - pad.b;
+  const xx = (i) => pad.l + (n === 1 ? 0 : (i / (n - 1)) * iw);
+  const yy = (v) => pad.t + ih - (v / max) * ih;
+  let g = "";
+  for (let i = 0; i <= 4; i++) { const y = pad.t + (i / 4) * ih, val = max - (i / 4) * max;
+    g += `<line x1="${pad.l}" y1="${y}" x2="${W - pad.r}" y2="${y}" stroke="var(--border-soft)"/><text x="8" y="${y + 3}" fill="var(--text-mut)" font-size="10">${num(Math.round(val))}</text>`; }
+  const line = (data, color, w) => { const pts = data.map((v, i) => v == null ? null : `${xx(i)},${yy(v)}`).filter(Boolean);
+    return pts.length ? `<polyline points="${pts.join(" ")}" fill="none" stroke="${color}" stroke-width="${w}" stroke-linejoin="round" stroke-linecap="round"/>` : ""; };
+  let today = "";
+  if (elapsedIdx != null && elapsedIdx >= 0 && elapsedIdx < n) { const px = xx(elapsedIdx);
+    today = `<line x1="${px}" y1="${pad.t}" x2="${px}" y2="${H - pad.b}" stroke="var(--border-strong)" stroke-dasharray="4 4"/>`; }
+  const step = Math.ceil(n / 8); let xl = "";
+  labels.forEach((lb, i) => { if (i % step === 0 || i === n - 1) xl += `<text x="${xx(i)}" y="${H - 8}" text-anchor="middle" fill="var(--text-mut)" font-size="10">${esc(sdate(lb))}</text>`; });
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">${g}${today}${line(forecast, "var(--role-approved)", 2.6)}${line(actual, "var(--role-actual)", 2.6)}${xl}</svg>
+    <div class="legend"><span><i style="background:var(--role-approved)"></i> חיזוי מצטבר</span><span><i style="background:var(--role-actual)"></i> מכר מצטבר</span></div>`;
+}
+function midCampaignBlock(p, m) {
+  const dur = Math.max(1, Number(p.duration_days) || 12);
+  const elapsed = m.phase === "COMPLETED" ? dur : Math.min(dur, liveDayN(p));
+  const labels = [], fc = [], ac = [];
+  for (let day = 0; day <= dur; day++) { labels.push(addDaysIso(p.start_date, day)); fc.push(Math.round(m.approved * day / dur));
+    ac.push(day <= elapsed ? Math.round(m.sold * day / Math.max(1, elapsed)) : null); }
+  const soldPct = m.approved > 0 ? Math.round(m.sold / m.approved * 100) : 0;
+  const perfChip = (v, l, u) => `<div class="chip"><div class="c-val">${v == null ? "—" : num(v) + (u || "")}</div><div class="c-lbl">${l}</div></div>`;
+  return `<div class="card-sub" style="margin:2px 0 10px">יום ${elapsed} מתוך ${dur} · ${soldPct}% מהחיזוי נמכר</div>
+    ${cumChart(labels, fc, ac, elapsed)}
+    <div class="chips" style="margin-top:14px">
+      ${perfChip(fqAcc(m.sold, m.approved), "איכות חיזוי", "%")}
+      ${perfChip(cap100(Number(p.otif_pct)), "OTIF", "%")}
+      ${perfChip(cap100(Number(p.availability_pct)), "זמינות", "%")}
+      ${perfChip(Number(p.shrink_pct), "פחת", "%")}</div>`;
+}
+function collapse(key, title, note, bodyHtml) {
+  const open = state._pdOpen && state._pdOpen.has(key);
+  return `<div class="collapse ${open ? "open" : ""}"><div class="col-head" data-collapse="${key}"><span class="chev">▸</span><h3>${title}</h3>${note ? `<span class="col-note">${note}</span>` : ""}</div>${open ? `<div class="col-body">${bodyHtml}</div>` : ""}</div>`;
+}
+function telemetryZone(p, m, det) {
+  const panel = state._pdPanel;
+  const requested = (panel && panel.pid === p.promo_id && panel.kind === "request" && panel.requested != null) ? panel.requested : null;
+  const outcome = `<div id="outcome-host">${outcomeTable(p, m, requested)}</div>`;
+  const mid = m.phase === "UPCOMING" ? `<div class="empty">הקמפיין טרם החל — נתוני ביצוע יופיעו כאן מהיום הראשון.</div>` : midCampaignBlock(p, m);
+  const allocs = (det.allocations || []).slice(0, 600);
+  state._promoDrillAllocs = allocs; state._promoDrillX = new Set();
+  return collapse("outcome", "תרחישי תוצאה — אישור מול התאמה", "השוואת שתי ההחלטות", outcome)
+    + collapse("hist", "השוואה היסטורית", "קצב אספקה מול חיזוי", historicalComparison(p, m))
+    + collapse("mid", "התקדמות הקמפיין", m.phase === "UPCOMING" ? "טרם החל" : "חיזוי מול בפועל", mid)
+    + collapse("store", `התפלגות סניפים (${num(p.store_count)} סניפים)`, "פירוט — לא קלט להחלטה", `<div id="promo-drill-tree">${renderDrillTree(allocs)}</div>`);
+}
+function drawPromoDetail(p, det, view) {
+  const m = promoModel(p, det);
+  const dec = getDecision(p.promo_id), decStatus = promoDecisionStatus(p);
+  const vName = LK.vendors[p.vendor_id] || p.vendor_id;
+  const repCat = (det.allocations && det.allocations[0] && det.allocations[0].category_name)
+    || (LK.items[p.representing_barcode] && LK.items[p.representing_barcode].dept_lv2_name) || "—";
+  $("#pt").textContent = p.description || p.promo_id;
+  $("#pc").textContent = p.promo_id + " · מבצעים";
+  const header = `<div class="pd-header">
+    <span class="pd-back" data-route="promotions">← חזרה לרשימת המבצעים</span>
+    <h2><span dir="auto">${esc(p.description)}</span></h2>
+    <div class="pd-meta"><b>${esc(p.promo_id)}</b><span class="sep">·</span><span dir="auto">${esc(vName)}</span><span class="sep">·</span>${displayName(p.display_type_code)}<span class="sep">·</span>${ptypeName(p.promo_type_code)}<span class="sep">·</span><span dir="auto">${esc(repCat)}</span><span class="sep">·</span>${sdate(p.start_date)} → ${sdate(p.end_date)}<span class="sep">·</span><span dir="ltr">${p.catalog_price != null ? money(p.catalog_price) : "—"} → ${p.promo_price != null ? money(p.promo_price) : "—"}${p._disc != null ? " (" + p._disc + "% הנחה)" : ""}</span><span class="sep">·</span>${num(p.store_count)} סניפים<span class="sep">·</span>${lifecyclePill(p)}<span class="sep">·</span>${startsCell(p)}</div></div>`;
+  const trio = `<div class="trio">
+    ${trioCard("provider", "PROVIDER FORECAST", "חיזוי מקורי", m.provider, `מקור: ספק החיזוי · קצב אספקה היסטורי ${Math.round(m.deliveryRate * 100)}%`, false)}
+    ${trioCard("approved", "APPROVED FORECAST", "חיזוי מאושר (נוכחי)", m.approved, approvedSub(p), true)}
+    ${trioCard("agreement", "TRADE AGREEMENT", "הסכם מסחרי", m.agreement, `ספק: <span dir="auto">${esc(vName)}</span> · ${sdate(p.start_date)} → ${sdate(p.end_date)}`, false)}</div>`;
+  view.innerHTML = header
+    + `<div class="pd-zone"><div class="pd-zone-title">אזור החלטה</div>${trio}${decisionRuler(m)}${decisionBar(p, m, decStatus, dec)}${renderDecisionPanel(p, m)}</div>`
+    + `<div class="pd-zone"><div class="pd-zone-title">בריאות ההחלטה</div>${healthZone(p, m)}</div>`
+    + `<div class="pd-zone"><div class="pd-zone-title">טלמטריה ופירוט</div>${telemetryZone(p, m, det)}</div>`;
+  attachDetailHandlers(p, m, det, view);
+}
+function attachDetailHandlers(p, m, det, view) {
+  view.querySelectorAll("[data-route]").forEach((el) => el.addEventListener("click", () => navigate(el.dataset.route)));
+  view.querySelectorAll("[data-collapse]").forEach((el) => el.addEventListener("click", () => {
+    const k = el.dataset.collapse; state._pdOpen.has(k) ? state._pdOpen.delete(k) : state._pdOpen.add(k); drawPromoDetail(p, det, view);
+  }));
+  view.querySelectorAll("[data-dir]").forEach((el) => el.addEventListener("click", () => { state._pdPanel.direction = el.dataset.dir; drawPromoDetail(p, det, view); }));
+  view.querySelectorAll("[data-act]").forEach((el) => el.addEventListener("click", () => handleDetailAct(el.dataset.act, p, m, det, view)));
+  const rq = view.querySelector("#req-qty");
+  if (rq) rq.addEventListener("input", () => {
+    const v = parseFloat(rq.value); state._pdPanel.requested = isNaN(v) ? null : v;
+    const host = view.querySelector("#outcome-host"); if (host) host.innerHTML = outcomeTable(p, m, isNaN(v) ? null : v);
+  });
+}
+function handleDetailAct(act, p, m, det, view) {
+  const by = state.user || "admin";
+  if (act === "accept") {
+    if (!confirm(`לאשר את החיזוי המאושר הנוכחי (${num(m.approved)} יח') כהחלטה סופית למבצע?`)) return;
+    setDecision(p.promo_id, { status: "accepted", value: m.approved, at: nowIso(), by }); state._pdPanel = null;
+  } else if (act === "match") {
+    state._pdPanel = { pid: p.promo_id, kind: "match" };
+  } else if (act === "request") {
+    state._pdPanel = { pid: p.promo_id, kind: "request", direction: m.approved < m.agreement ? "down" : "up", requested: m.approved };
+    state._pdOpen.add("outcome");
+  } else if (act === "panel-cancel") {
+    state._pdPanel = null;
+  } else if (act === "reset") {
+    setDecision(p.promo_id, null); state._pdPanel = null;
+  } else if (act === "match-confirm") {
+    const q = parseFloat((view.querySelector("#match-qty") || {}).value);
+    const reason = (view.querySelector("#match-reason") || {}).value || "";
+    const note = (view.querySelector("#match-note") || {}).value || "";
+    if (isNaN(q)) { alert("נא להזין כמות יעד תקינה"); return; }
+    setDecision(p.promo_id, { status: "matched", value: q, reason: note ? reason + " — " + note : reason, at: nowIso(), by });
+    state._pdPanel = null;
+  } else if (act === "request-confirm") {
+    const q = parseFloat((view.querySelector("#req-qty") || {}).value);
+    const urg = (view.querySelector("#req-urg") || {}).value || "רגילה";
+    const msg = (view.querySelector("#req-msg") || {}).value || "";
+    const dir = (state._pdPanel && state._pdPanel.direction) || "down";
+    if (isNaN(q)) { alert("נא להזין כמות מבוקשת תקינה"); return; }
+    pushRevision({ promo_id: p.promo_id, description: p.description, vendor_id: p.vendor_id,
+      current_agreement: m.agreement, requested_qty: q, direction: dir, urgency: urg, message: msg, at: nowIso(), by });
+    setDecision(p.promo_id, { status: "change_requested", requested: q, direction: dir, urgency: urg, value: null, at: nowIso(), by });
+    state._pdPanel = null;
+    alert("הבקשה נשלחה למחלקת הסחר ונרשמה בתור הבקשות.");
+  }
+  drawPromoDetail(p, det, view);
+}
+async function renderPromoDetailPage(pid, view) {
+  if (!state._promo) { const d = await load("/api/promotions"); if (d) state._promo = d; }
+  state._decisions = loadDecisions(); state._revisions = loadRevisions();
+  state._pdPanel = null;
+  const d = state._promo || {};
+  const p0 = (d.promotions || []).find((x) => x.promo_id === pid);
+  if (!p0) { view.innerHTML = `<div class="empty">מבצע ${esc(pid)} לא נמצא — <a class="linkish" data-route="promotions" style="cursor:pointer">חזרה לרשימה</a></div>`;
+    view.querySelectorAll("[data-route]").forEach((el) => el.addEventListener("click", () => navigate(el.dataset.route))); return; }
+  const p = { ...p0, _phase: promoPhase(p0), _days: promoDays(p0.start_date), _disc: promoDisc(p0) };
+  state._pdOpen = new Set(p._phase === "UPCOMING" ? ["outcome", "hist"] : ["outcome", "hist", "mid"]);
+  view.innerHTML = `<div class="pd-header"><span class="pd-back" data-route="promotions">← חזרה לרשימת המבצעים</span><h2><span dir="auto">${esc(p.description)}</span></h2><div class="pd-meta">${esc(pid)} · טוען נתונים…</div></div>${spinner}`;
+  const det = await promoDetail(pid);
+  drawPromoDetail(p, det, view);
 }
 
 const DRILL = {
@@ -1094,91 +1522,7 @@ const DRILL = {
         ["נוצר ע\"י", esc(run.created_by)], ["מס' סניפים", (run.store_filter || []).length], ["מס' פריטים", (run.item_filter || []).length],
       ]) + `<h4>הקצאות לסניף-פריט (${allocs.length})</h4>` + tableHTML(cols, allocs));
   },
-  promo: async (pid) => {
-    const d = state._promo; const p0 = (d.promotions || []).find((x) => x.promo_id === pid); if (!p0) return;
-    const p = { ...p0, _phase: promoPhase(p0), _days: promoDays(p0.start_date), _disc: promoDisc(p0) };
-    openModal(`<span dir="auto">${esc(p.description)}</span>`, `${esc(p.promo_id)} · ${badge(p.status)}`, spinner);
-    const det = await promoDetail(pid);
-    const allocs = det.allocations || [], whsup = det.wh_supply || [], strength = det.aces_strength || [];
-    const orig = Number(p.original_forecast_total || 0), appr = Number(p.approved_forecast_total || 0);
-    const ord = Number(p.ordered_total || 0), sold = Number(p.sold_total || 0);
-    const recom = Number(p.store_recommended_total || 0);
-    const whR = Number(p.wh_recommended_total || 0), whO = Number(p.wh_ordered_total || 0);
-    const trade = Number(p.trade_agreement_qty || 0);
-    const fq = fqAcc(sold, appr);
-    const adoptS = recom > 0 ? cap100(Math.round(ord / recom * 100)) : null;
-    const adoptW = whR > 0 ? cap100(Math.round(whO / whR * 100)) : null;
-    const cover = trade > 0 ? cap100(Math.round(appr / trade * 100)) : null;
-    const gap = trade > 0 ? (trade - appr) / trade : 0;
-    const maxF = Math.max(orig, appr, trade, ord, sold, 1);
-    const bar = (label, val, color) => `<div style="margin:7px 0"><div style="display:flex;justify-content:space-between;font-size:12px"><span>${label}</span><span class="strong">${num(val)}</span></div><div class="bar" style="height:10px"><i style="width:${Math.round(val / maxF * 100)}%;background:${color}"></i></div></div>`;
-    const repCat = (allocs[0] && allocs[0].category_name) || (LK.items[p.representing_barcode] && LK.items[p.representing_barcode].dept_lv2_name) || "—";
-    let body = kv([
-      ["סוג פעילות", badge(p.activity_type)], ["שלב", promoPhaseBadge(p)],
-      ["פורמט", formatName(p.format_code)], ["אמצעי תצוגה", displayName(p.display_type_code)],
-      ["סוג מבצע", ptypeName(p.promo_type_code)], ["ספק", LK.vendors[p.vendor_id] || p.vendor_id],
-      ["מועדון / קהל", LOYALTY_HE[p.loyalty_segment_code] || p.loyalty_segment_code || "—"],
-      ["היררכיית פריט", `<span dir="auto">${esc(repCat)}</span>`],
-      ["מחסן מנהל", p.managing_warehouse_id ? "מחסן " + p.managing_warehouse_id : "ישיר"],
-      ["מחיר קטלוגי", p.catalog_price != null ? money(p.catalog_price) : "—"],
-      ["מחיר מבצע", p.promo_price != null ? money(p.promo_price) : badge("WAITING_QC", "טרם נקבע")],
-      ["% הנחה", p._disc != null ? `<span class="strong">${p._disc}%</span>` : "—"],
-      ["תאריכים", sdate(p.start_date) + " — " + sdate(p.end_date)], ["מס' סניפים", num(p.store_count)],
-    ]);
-    body += `<h4>חיזוי, הזמנה ומכר (סה"כ)</h4><div class="card" style="background:var(--bg-2)">
-      ${bar("חיזוי מקורי (ספק)", orig, "#64748b")}
-      ${bar("חיזוי מאושר (מנהל שרשרת)", appr, "#6366f1")}
-      ${trade ? bar("הסכם מסחרי", trade, (gap > 0.10) ? "#ef4444" : "#22c55e") : ""}
-      ${ord ? bar("הוזמן מספק (מצטבר)", ord, "#38bdf8") : ""}
-      ${sold ? bar("נמכר בפועל", sold, "#22c55e") : ""}</div>`;
-    if (gap > 0.10) body += `<div class="login-error" style="margin-top:12px">⚠ חיזוי מאושר (${num(appr)}) נמוך מההסכם המסחרי (${num(trade)}) ביותר מ-10% — המבצע חלש מדי לכמות ההסכם.</div>`;
-    body += `<h4>מדדי ביצוע</h4><div class="chips">
-      <div class="chip"><div class="c-val">${fq == null ? "—" : fq + "%"}</div><div class="c-lbl">איכות חיזוי (דיוק)</div></div>
-      <div class="chip"><div class="c-val">${adoptS == null ? "—" : adoptS + "%"}</div><div class="c-lbl">אימוץ סניפים</div></div>
-      <div class="chip"><div class="c-val">${adoptW == null ? "—" : adoptW + "%"}</div><div class="c-lbl">אימוץ מחסנים</div></div>
-      <div class="chip"><div class="c-val">${cover == null ? "—" : cover + "%"}</div><div class="c-lbl">כיסוי הסכם מסחרי</div></div>
-      <div class="chip"><div class="c-val">${cap100(Number(p.otif_pct))}%</div><div class="c-lbl">OTIF</div></div>
-      <div class="chip"><div class="c-val">${cap100(Number(p.availability_pct))}%</div><div class="c-lbl">זמינות</div></div>
-      <div class="chip"><div class="c-val">${num(p.shrink_pct)}%</div><div class="c-lbl">פחת</div></div></div>`;
-    const ca = campaignAnalysis(p);
-    body += `<h4>ניתוח קמפיין ו-ROI הסכם מסחרי</h4><div class="chips">
-      <div class="chip"><div class="c-val">${ca.sold ? num(ca.sold) : "—"}</div><div class="c-lbl">מכר בתקופת הקמפיין</div></div>
-      <div class="chip"><div class="c-val">${ca.boost == null ? "—" : (ca.boost > 0 ? "+" : "") + ca.boost + "%"}</div><div class="c-lbl">זינוק מכירות מול שבועיים לפני</div></div>
-      <div class="chip"><div class="c-val">${ca.revUplift == null ? "—" : (ca.revUplift >= 0 ? "+" : "") + money(Math.round(ca.revUplift))}</div><div class="c-lbl">תוספת הכנסה מול שבועיים לפני (כולל הנחה)</div></div>
-      <div class="chip"><div class="c-val">${ca.stockDaysAfter == null ? "—" : ca.stockDaysAfter}</div><div class="c-lbl">ימי מלאי שנותרו לאחר הקמפיין</div></div>
-    </div>
-    <div class="card" style="background:var(--bg-2);margin-top:12px">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px"><span class="strong">הערכת עודף הסכם מסחרי</span><span class="badge ${ca.vtone}">${ca.verdict}</span></div>
-      <div class="card-sub" style="margin:0 0 10px">${ca.phase === "COMPLETED" ? "בהשוואה למכירות בפועל (רטרו)" : "בהשוואה לחיזוי מאושר/מקורי (לפני/במהלך)"} — עודף הסכם יוצר ימי מלאי, פחת ועלויות הובלה מיותרות.</div>
-      <div class="chips">
-        <div class="chip"><div class="c-val">${num(ca.overshoot)}</div><div class="c-lbl">עודף יח' מול ${ca.phase === "COMPLETED" ? "מכר" : "חיזוי"}</div></div>
-        <div class="chip"><div class="c-val">${money(Math.round(ca.storageCost))}</div><div class="c-lbl">עלות אחסון</div></div>
-        <div class="chip"><div class="c-val">${money(Math.round(ca.shrinkCost))}</div><div class="c-lbl">עלות פחת</div></div>
-        <div class="chip"><div class="c-val">${money(Math.round(ca.transportCost))}</div><div class="c-lbl">עלות הובלה</div></div>
-        <div class="chip"><div class="c-val strong">${money(ca.overshootCost)}</div><div class="c-lbl">עלות עודף כוללת</div></div>
-      </div>
-    </div>`;
-    if (strength.length) {
-      const items = strength.slice().sort((a, b) => Number(b.anchor_tec_forecast_qty) - Number(a.anchor_tec_forecast_qty))
-        .map((s) => ({ label: { VERY_DEEP: "עמוק מאוד", DEEP: "עמוק", STRONG: "חזק", MEDIUM: "בינוני" }[s.strength_class] || s.strength_class, value: Number(s.anchor_tec_forecast_qty), color: s.selected_by_user ? "#22c55e" : "#6366f1" }));
-      body += `<h4>סולם חוזק חיזוי (ACES) — ירוק = נבחר</h4>${vbars(items)}`;
-    }
-    state._promoDrillAllocs = allocs.slice(0, 600);
-    state._promoDrillX = new Set();
-    body += `<h4>מגוון סניפי — סניף · מקבץ/פריט → ברקודים (${num(p.store_count)} סניפים)</h4>
-      <div class="card-sub" style="margin:-6px 0 8px">כל שורה היא סניף עם מקבץ מוביל או פריט עצמאי; לחיצה על מקבץ פותחת את הברקודים שבו.</div>
-      <div id="promo-drill-tree">${renderDrillTree(state._promoDrillAllocs)}</div>`;
-    if (whsup.length) {
-      const wcols = [
-        { key: "warehouse_id", label: "מחסן", render: (r) => "מחסן " + esc(r.warehouse_id) },
-        { key: "item_desc", label: "פריט", render: (r) => `<span dir="auto">${esc(r.item_desc)}</span>` },
-        { key: "wh_recommended_qty", label: "המלצת מחסן", num: true, render: (r) => num(r.wh_recommended_qty) },
-        { key: "wh_ordered_qty", label: "הוזמן מחסן", num: true, render: (r) => num(r.wh_ordered_qty) },
-      ];
-      body += `<h4>אספקת מחסן (${whsup.length})</h4>` + tableHTML(wcols, whsup);
-    }
-    openModal(`<span dir="auto">${esc(p.description)}</span>`, `${esc(p.promo_id)} · ${badge(p.status)}`, body);
-  },
+  promo: (pid) => { closeModal(); navigate("promotions/" + pid); },
   tree: (tid) => {
     const d = state._can; const t = d.trees.find((x) => x.tree_id === tid); if (!t) return;
     const ms = d.members.filter((m) => m.tree_id === tid).sort((a, b) => Number(b.influence_percent) - Number(a.influence_percent));
@@ -1299,22 +1643,32 @@ function logoSVG() {
   return `<svg viewBox="0 0 100 100" width="26" height="26"><path d="M22 70 L42 44 L56 58 L78 28" stroke="white" stroke-width="9" fill="none" stroke-linecap="round" stroke-linejoin="round"/><circle cx="78" cy="28" r="7" fill="white"/></svg>`;
 }
 
-async function navigate(route) {
-  if (!PAGES[route]) route = "overview";
-  state.route = route;
-  location.hash = "#/" + route;
+async function navigate(token) {
+  token = token || "overview";
+  const slash = token.indexOf("/");
+  const base = slash >= 0 ? token.slice(0, slash) : token;
+  const sub = slash >= 0 ? token.slice(slash + 1) : "";
+  const validBase = PAGES[base] ? base : "overview";
+  const canonical = validBase === base ? token : validBase;
+  state.route = validBase;
+  state.currentToken = canonical;
+  location.hash = "#/" + canonical;
   document.querySelectorAll(".nav-item").forEach((n) =>
-    n.classList.toggle("active", n.dataset.route === route));
-  const [t, c] = TITLES[route] || [route, ""];
+    n.classList.toggle("active", n.dataset.route === validBase));
+  const [t, c] = TITLES[validBase] || [validBase, ""];
   $("#pt").textContent = t; $("#pc").textContent = c;
   const view = $("#view");
   view.innerHTML = spinner;
   await ensureMaster();
   if (!state.token) return; // token was invalidated during load -> login shown
   try {
-    const html = await PAGES[route]();
+    if (validBase === "promotions" && sub) {
+      await renderPromoDetailPage(sub, view);
+      return;
+    }
+    const html = await PAGES[validBase]();
     view.innerHTML = html;
-    if (PAGES[route].after) PAGES[route].after();
+    if (PAGES[validBase].after) PAGES[validBase].after();
   } catch (e) {
     console.error(e);
     view.innerHTML = `<div class="empty">שגיאה בטעינת העמוד: ${esc(e.message)}</div>`;
@@ -1366,6 +1720,14 @@ document.addEventListener("click", (e) => {
   if (close) { closeModal(); return; }
   const d = e.target.closest("[data-drill]");
   if (d) { drill(d.dataset.drill); return; }
+  const pt = e.target.closest("[data-ptree]");
+  if (pt && document.querySelector("#promo-drill-tree")) {
+    const id = pt.dataset.ptree;
+    state._promoDrillX.has(id) ? state._promoDrillX.delete(id) : state._promoDrillX.add(id);
+    const c = document.querySelector("#promo-drill-tree");
+    if (c) c.innerHTML = renderDrillTree(state._promoDrillAllocs);
+    return;
+  }
   const nav = e.target.closest(".nav-item");
   if (nav) { navigate(nav.dataset.route); return; }
   if (e.target.closest("#logout")) { logout(); }
@@ -1389,15 +1751,15 @@ document.addEventListener("click", (e) => {
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
 window.addEventListener("hashchange", () => {
   if (!state.token) return;
-  const r = (location.hash || "").replace("#/", "");
-  if (r && r !== state.route && PAGES[r]) navigate(r);
+  const tok = (location.hash || "").replace("#/", "");
+  if (tok && tok !== state.currentToken) navigate(tok);
 });
 
 /* ---------------- boot ---------------- */
 async function boot() {
   renderShell();
-  const r = (location.hash || "").replace("#/", "") || "overview";
-  await navigate(PAGES[r] ? r : "overview");
+  const tok = (location.hash || "").replace("#/", "") || "overview";
+  await navigate(tok);
 }
 
 (async function init() {
