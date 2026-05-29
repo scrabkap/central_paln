@@ -299,6 +299,9 @@ def handler(event, _context):
     rc = event.get("requestContext", {})
     method = rc.get("http", {}).get("method", "GET")
     path = event.get("rawPath", "/")
+    # tolerate a stale cached client that double-prefixes the API path
+    if path.startswith("/api/api/"):
+        path = path.replace("/api/api/", "/api/", 1)
 
     if method == "OPTIONS":
         return _resp({"ok": True})

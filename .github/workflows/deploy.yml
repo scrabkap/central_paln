@@ -125,9 +125,9 @@ jobs:
 
       - name: Upload SPA to S3
         run: |
-          aws s3 sync web/ "s3://${{ steps.out.outputs.web_bucket }}/" --delete
-          aws s3 cp web/index.html "s3://${{ steps.out.outputs.web_bucket }}/index.html" \
-            --cache-control "no-cache" --content-type "text/html"
+          # no-cache on every asset so future deploys propagate without stale edge copies
+          aws s3 sync web/ "s3://${{ steps.out.outputs.web_bucket }}/" --delete \
+            --cache-control "no-cache, must-revalidate"
 
       - name: Seed mock data into DynamoDB
         run: |
