@@ -923,7 +923,7 @@ function canRibbon(rx, rTop, rBot, lx, lTop, lBot) {
   return `M ${rx} ${rTop} C ${mid} ${rTop}, ${mid} ${lTop}, ${lx} ${lTop} L ${lx} ${lBot} C ${mid} ${lBot}, ${mid} ${rBot}, ${rx} ${rBot} Z`;
 }
 function canFlowSVG(c) {
-  const W = 760, H = 360, padTop = 44, chartH = 250, barW = 14;
+  const W = 760, H = 250, padTop = 56, chartH = 162, barW = 14;
   const rInner = 612, lOuter = 150, lInner = lOuter + barW;
   const scale = chartH / Math.max(c.groupBase, 1);
   const isLoss = c.loss > 0;
@@ -935,10 +935,10 @@ function canFlowSVG(c) {
   const baseBottom = padTop + c.groupBase * scale, adjBottom = padTop + c.groupAdjusted * scale;
   let s = `<svg viewBox="0 0 ${W} ${H}" class="can-flow-svg" preserveAspectRatio="xMidYMid meet">`;
   s += `<defs><linearGradient id="canLossGrad" x1="1" y1="0" x2="0" y2="0"><stop offset="0" stop-color="#E5556A" stop-opacity=".05"/><stop offset="1" stop-color="#E5556A" stop-opacity=".34"/></linearGradient></defs>`;
-  s += `<text x="${rInner + barW / 2}" y="24" class="can-flow-axis" text-anchor="middle">חיזוי בסיס מצרפי</text>`;
-  s += `<text x="${rInner + barW / 2}" y="${baseBottom + 24}" class="can-flow-val prov" text-anchor="middle">${num(c.groupBase)}</text>`;
-  s += `<text x="${lOuter + barW / 2}" y="24" class="can-flow-axis" text-anchor="middle">חיזוי מתואם</text>`;
-  s += `<text x="${lOuter + barW / 2}" y="${adjBottom + 24}" class="can-flow-val appr" text-anchor="middle">${num(c.groupAdjusted)}</text>`;
+  s += `<text x="${rInner + barW / 2}" y="20" class="can-flow-axis" text-anchor="middle">חיזוי בסיס מצרפי</text>`;
+  s += `<text x="${rInner + barW / 2}" y="42" class="can-flow-val prov" text-anchor="middle">${num(c.groupBase)}</text>`;
+  s += `<text x="${lOuter + barW / 2}" y="20" class="can-flow-axis" text-anchor="middle">חיזוי מתואם</text>`;
+  s += `<text x="${lOuter + barW / 2}" y="42" class="can-flow-val appr" text-anchor="middle">${num(c.groupAdjusted)}</text>`;
   if (isLoss) {
     const mid = (rInner + lInner) / 2, ly2 = (adjBottom + baseBottom) / 2 + 4;
     s += `<path d="M ${rInner} ${baseBottom} C ${mid} ${baseBottom}, ${mid} ${adjBottom}, ${lInner} ${adjBottom} L ${lInner} ${baseBottom} Z" fill="url(#canLossGrad)"/>`;
@@ -953,33 +953,6 @@ function canFlowSVG(c) {
     if (sg.lBot - sg.lTop > 0.5) s += `<rect x="${lOuter}" y="${sg.lTop}" width="${barW}" height="${sg.lBot - sg.lTop}" fill="${sg.m.color}" rx="2"/>`;
   });
   if (isLoss) s += `<rect x="${lOuter}" y="${adjBottom}" width="${barW}" height="${Math.max(baseBottom - adjBottom, 0)}" fill="#E5556A" rx="2"/>`;
-  return s + `</svg>`;
-}
-/* ---- volume balance waterfall (base → loss → adjusted) ---- */
-function canWaterfall(c) {
-  const W = 320, H = 150, padL = 8, padR = 8, base = 116, bw = 56;
-  const slot = (W - padL - padR) / 3, max = Math.max(c.groupBase, 1);
-  const h = (v) => (v / max) * 92, cx = (i) => padL + slot * i + slot / 2;
-  const baseH = h(c.groupBase), adjH = h(c.groupAdjusted), lossH = baseH - adjH;
-  let s = `<svg viewBox="0 0 ${W} ${H}" class="can-wf-svg" preserveAspectRatio="xMidYMid meet">`;
-  s += `<rect x="${cx(0) - bw / 2}" y="${base - baseH}" width="${bw}" height="${baseH}" rx="3" fill="var(--role-provider)" fill-opacity=".85"/>`;
-  s += `<text x="${cx(0)}" y="${base - baseH - 6}" class="can-wf-num" text-anchor="middle">${num(c.groupBase)}</text>`;
-  s += `<text x="${cx(0)}" y="${base + 16}" class="can-wf-lbl" text-anchor="middle">בסיס</text>`;
-  if (c.loss > 0) {
-    s += `<rect x="${cx(1) - bw / 2}" y="${base - baseH}" width="${bw}" height="${lossH}" rx="3" fill="var(--bad)" fill-opacity=".8"/>`;
-    s += `<text x="${cx(1)}" y="${base - baseH - 6}" class="can-wf-num bad" text-anchor="middle">−${num(c.loss)}</text>`;
-    s += `<text x="${cx(1)}" y="${base + 16}" class="can-wf-lbl" text-anchor="middle">אובדן</text>`;
-    s += `<line x1="${cx(0) + bw / 2}" y1="${base - baseH}" x2="${cx(1) - bw / 2}" y2="${base - baseH}" class="can-wf-conn"/>`;
-    s += `<line x1="${cx(1) + bw / 2}" y1="${base - adjH}" x2="${cx(2) - bw / 2}" y2="${base - adjH}" class="can-wf-conn"/>`;
-  } else {
-    s += `<text x="${cx(1)}" y="${base - 42}" class="can-wf-keep" text-anchor="middle">נפח נשמר</text>`;
-    s += `<text x="${cx(1)}" y="${base - 26}" class="can-wf-keep" text-anchor="middle">ללא אובדן</text>`;
-    s += `<line x1="${cx(0) + bw / 2}" y1="${base - baseH}" x2="${cx(2) - bw / 2}" y2="${base - adjH}" class="can-wf-conn"/>`;
-  }
-  s += `<rect x="${cx(2) - bw / 2}" y="${base - adjH}" width="${bw}" height="${adjH}" rx="3" fill="var(--role-approved)" fill-opacity=".9"/>`;
-  s += `<text x="${cx(2)}" y="${base - adjH - 6}" class="can-wf-num appr" text-anchor="middle">${num(c.groupAdjusted)}</text>`;
-  s += `<text x="${cx(2)}" y="${base + 16}" class="can-wf-lbl" text-anchor="middle">מתואם</text>`;
-  s += `<line x1="${padL}" y1="${base}" x2="${W - padR}" y2="${base}" class="can-wf-base"/>`;
   return s + `</svg>`;
 }
 
@@ -1147,10 +1120,7 @@ function drawCanEditor(view) {
       <h2><span dir="auto">${esc(w.notes || w.tree_id)}</span> ${typePill} ${statusPill}</h2>
       <div class="pd-meta"><span dir="auto">${esc(canVendors(w))}</span><span class="sep">·</span>${w.members.length} פריטים<span class="sep">·</span><span class="num">${esc(w.tree_id)}</span>${w.source_suggestion_id ? `<span class="sep">·</span>מקור: ${esc(w.source_suggestion_id)}` : ""}</div></div>
     <div class="pd-zone"><div class="pd-zone-title">חלוקת החיזוי — מהבסיס אל הפריטים${isBD ? "" : ", וכמה נגרע בדרך"}</div>
-      <div class="can-flow-grid">
-        <div class="can-flow-host" id="can-flow">${canFlowSVG(c)}</div>
-        <div class="can-wf-card"><div class="can-wf-title">מאזן נפח</div><div class="can-wf-host" id="can-wf">${canWaterfall(c)}</div></div>
-      </div></div>
+      <div class="can-flow-host" id="can-flow">${canFlowSVG(c)}</div></div>
     <div class="pd-zone"><div class="pd-zone-title">עורך החלוקה</div>${editor}</div>
     ${replaceZone}
     <div class="pd-zone"><div class="pd-zone-title">בריאות ההחלטה</div><div class="health-grid ace-health" id="can-health">${canHealth(c)}</div></div>
@@ -1182,7 +1152,6 @@ function canRefreshLive(view) {
   });
   const sp = view.querySelector("#can-split-preview"); if (sp) sp.innerHTML = canSplit(c);
   const fh = view.querySelector("#can-flow"); if (fh) fh.innerHTML = canFlowSVG(c);
-  const wf = view.querySelector("#can-wf"); if (wf) wf.innerHTML = canWaterfall(c);
   const ga = view.querySelector("#can-group-adj"); if (ga) ga.textContent = num(c.groupAdjusted);
   const gl = view.querySelector("#can-group-loss"); if (gl) gl.textContent = c.loss > 0 ? "−" + num(c.loss) : "—";
   const rl = view.querySelector("#can-rate-loss"); if (rl) rl.textContent = "−" + num(c.loss);
