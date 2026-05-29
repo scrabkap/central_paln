@@ -452,6 +452,7 @@ PAGES.promotions = async () => {
   state._promo = d;
   state._promoF = { bucket: "next2w", format: "", display: "", vendor: "", ptype: "", wh: "" };
   state._promoX = new Set();
+  state._approvedOverride = {};
   return `<div id="promo-root"></div>`;
 };
 PAGES.promotions.after = () => {
@@ -465,7 +466,7 @@ PAGES.promotions.after = () => {
     const b = e.target.closest("[data-bucket]");
     if (b) { state._promoF.bucket = b.dataset.bucket; renderPromo(); return; }
     const o = e.target.closest("[data-open]");
-    if (o) { DRILL.promo(o.dataset.open); return; }
+    if (o) { const s = o.dataset.open; s.startsWith("promo:") ? DRILL.promo(s.slice(6)) : openAggPopup(s); return; }
     const t = e.target.closest("[data-toggle]");
     if (t) { state._promoX.has(t.dataset.toggle) ? state._promoX.delete(t.dataset.toggle) : state._promoX.add(t.dataset.toggle); renderPromo(); }
   });
@@ -506,15 +507,17 @@ function groupMap(arr, keyFn) {
 function buildPromoTree(allocs, pmap) {
   const out = [];
   for (const [fcode, fa] of groupMap(allocs, (a) => a.format_code)) {
-    const fnode = { id: "F#" + fcode, depth: 0, kind: "format", label: formatName(fcode), allocs: fa, pmap, children: [] };
-    for (const [dcode, da] of groupMap(fa, (a) => a.display_type_code)) {
-      const dnode = { id: fnode.id + "|D#" + dcode, depth: 1, kind: "display", label: displayName(dcode), allocs: da, pmap, children: [] };
-      for (const [pid, pa] of groupMap(da, (a) => a.promo_id)) {
-        const pnode = { id: "P#" + pid, depth: 2, kind: "promo", label: pmap[pid] ? pmap[pid].description : pid, promo: pmap[pid], allocs: pa, pmap, children: [] };
-        pa.forEach((a) => pnode.children.push({ id: "L#" + pid + a.store_id + a.item_barcode, depth: 3, kind: "leaf", alloc: a }));
-        dnode.children.push(pnode);
+    const fnode = { id: "F#" + fcode, depth: 0, kind: "format", fmt: fcode, open: "fmt:" + fcode, label: formatName(fcode), allocs: fa, pmap, children: [] };
+    for (const [vcode, va] of groupMap(fa, (a) => a.vendor_id)) {
+      const vnode = { id: fnode.id + "|V#" + vcode, depth: 1, kind: "vendor", open: "ven:" + fcode + "|" + vcode, label: LK.vendors[vcode] || vcode, allocs: va, pmap, children: [] };
+      for (const [dcode, da] of groupMap(va, (a) => a.display_type_code)) {
+        const dnode = { id: vnode.id + "|D#" + dcode, depth: 2, kind: "display", open: "disp:" + fcode + "|" + vcode + "|" + dcode, label: displayName(dcode), allocs: da, pmap, children: [] };
+        for (const [pid, pa] of groupMap(da, (a) => a.promo_id)) {
+          dnode.children.push({ id: "P#" + pid + "@" + vnode.id, depth: 3, kind: "promo", open: "promo:" + pid, promo: pmap[pid], label: pmap[pid] ? pmap[pid].description : pid, allocs: pa, pmap });
+        }
+        vnode.children.push(dnode);
       }
-      fnode.children.push(dnode);
+      fnode.children.push(vnode);
     }
     out.push(fnode);
   }
@@ -525,8 +528,9 @@ function aggNode(node) {
   let trade = 0;
   if (node.kind === "promo") trade = Number(node.promo && node.promo.trade_agreement_qty || 0);
   else new Set(a.map((x) => x.promo_id)).forEach((pid) => { trade += Number(node.pmap[pid] && node.pmap[pid].trade_agreement_qty || 0); });
-  const appr = sumOf(a, "approved_forecast_qty"), ord = sumOf(a, "store_ordered_qty");
-  const sold = sumOf(a, "sold_qty"), recom = sumOf(a, "store_recommended_qty");
+  let appr = sumOf(a, "approved_forecast_qty");
+  if (node.kind === "format" && state._approvedOverride[node.fmt] != null) appr = Number(state._approvedOverride[node.fmt]);
+  const ord = sumOf(a, "store_ordered_qty"), sold = sumOf(a, "sold_qty"), recom = sumOf(a, "store_recommended_qty");
   return {
     storeCount: new Set(a.map((x) => x.store_id)).size,
     orig: sumOf(a, "original_forecast_qty"), appr, ord, sold, recom, trade,
@@ -535,39 +539,123 @@ function aggNode(node) {
   };
 }
 function renderPromoNode(node) {
-  if (node.kind === "leaf") {
-    const a = node.alloc;
-    const appr = Number(a.approved_forecast_qty || 0), recom = Number(a.store_recommended_qty || 0);
-    const ord = Number(a.store_ordered_qty || 0), sold = Number(a.sold_qty || 0);
-    const fq = sold > 0 ? Math.round(sold / appr * 100) : null;
-    const adopt = recom > 0 ? Math.round(ord / recom * 100) : null;
-    return `<tr>
-      <td style="padding-inline-start:${3 * 18 + 12}px"><span dir="auto">${esc(a.item_desc)}</span> <span class="mut">· ${esc(a.store_name || storeName(a.store_id))}</span> <span class="badge gray">${esc(LK.vendors[a.vendor_id] || a.vendor_id)}</span></td>
-      <td class="num mut">1</td><td class="num">${num(a.original_forecast_qty)}</td><td class="num">${num(appr)}</td>
-      <td class="num">${num(ord)}</td><td class="num">${sold ? num(sold) : "—"}</td>
-      <td class="num">${fq == null ? "—" : `<span class="badge ${fqTone(fq)}">${fq}%</span>`}</td>
-      <td class="num">${adopt == null ? "—" : `<span class="badge ${adoptTone(adopt)}">${adopt}%</span>`}</td>
-      <td class="num mut">—</td><td class="mut">—</td></tr>`;
-  }
   const m = aggNode(node);
-  const exp = state._promoX.has(node.id);
+  const isPromo = node.kind === "promo";
+  const exp = !isPromo && state._promoX.has(node.id);
   const weak = m.trade > 0 && m.appr < m.trade;
   const warn = [];
   if (weak) warn.push(`<span class="badge red">חלש מול הסכם</span>`);
   if (m.adopt != null && m.adopt < 70) warn.push(`<span class="badge amber">אימוץ נמוך</span>`);
   if (m.fq != null && (m.fq < 75 || m.fq > 125)) warn.push(`<span class="badge ${m.fq > 125 ? "red" : "amber"}">חיזוי ${m.fq < 100 ? "מעל" : "מתחת"} למכר</span>`);
-  const name = node.kind === "promo"
-    ? `<span data-open="${esc(node.promo.promo_id)}" style="cursor:pointer;text-decoration:underline dotted"><span dir="auto">${esc(node.label)}</span></span> ${promoPhaseBadge(node.promo)}`
-    : `<span dir="auto" class="strong">${esc(node.label)}</span>`;
-  const row = `<tr data-toggle="${esc(node.id)}" class="clickable">
-    <td style="padding-inline-start:${node.depth * 18 + 12}px"><span style="display:inline-block;width:14px">${exp ? "▾" : "▸"}</span> ${name}</td>
-    <td class="num">${m.storeCount}</td><td class="num">${num(m.orig)}</td><td class="num">${num(m.appr)}</td>
+  const override = node.kind === "format" && state._approvedOverride[node.fmt] != null;
+  const chevron = isPromo ? `<span style="display:inline-block;width:14px"></span>`
+    : `<span style="display:inline-block;width:14px">${exp ? "▾" : "▸"}</span>`;
+  const name = `<span data-open="${esc(node.open)}" style="cursor:pointer;text-decoration:underline dotted"><span dir="auto" class="${isPromo ? "" : "strong"}">${esc(node.label)}</span></span>${isPromo ? " " + promoPhaseBadge(node.promo) : ""}`;
+  const rowAttr = isPromo ? `class="clickable"` : `data-toggle="${esc(node.id)}" class="clickable"`;
+  const row = `<tr ${rowAttr}>
+    <td style="padding-inline-start:${node.depth * 18 + 12}px">${chevron} ${name}</td>
+    <td class="num">${m.storeCount}</td><td class="num">${num(m.orig)}</td>
+    <td class="num">${num(m.appr)}${override ? ' <span class="badge violet">ידני</span>' : ""}</td>
     <td class="num">${num(m.ord)}</td><td class="num">${m.sold ? num(m.sold) : "—"}</td>
     <td class="num">${m.fq == null ? "—" : `<span class="badge ${fqTone(m.fq)}">${m.fq}%</span>`}</td>
     <td class="num">${m.adopt == null ? "—" : `<span class="badge ${adoptTone(m.adopt)}">${m.adopt}%</span>`}</td>
     <td class="num">${m.trade ? num(m.trade) : "—"}</td>
     <td>${warn.join(" ") || "<span class='mut'>—</span>"}</td></tr>`;
   return row + (exp ? node.children.map(renderPromoNode).join("") : "");
+}
+
+/* aggregate-level popups (format / vendor / display) */
+function aggMetrics(allocs, pmap, override) {
+  const pids = new Set(allocs.map((a) => a.promo_id));
+  const apprRolled = sumOf(allocs, "approved_forecast_qty");
+  const appr = override != null ? Number(override) : apprRolled;
+  const ord = sumOf(allocs, "store_ordered_qty"), sold = sumOf(allocs, "sold_qty"), recom = sumOf(allocs, "store_recommended_qty");
+  let trade = 0, disc = 0, otif = 0, avail = 0, shrink = 0, n = 0;
+  pids.forEach((pid) => { const p = pmap[pid]; if (p) { trade += Number(p.trade_agreement_qty || 0); disc += Number(p._disc || 0); otif += Number(p.otif_pct || 0); avail += Number(p.availability_pct || 0); shrink += Number(p.shrink_pct || 0); n++; } });
+  return {
+    storeCount: new Set(allocs.map((a) => a.store_id)).size, promoCount: pids.size,
+    orig: sumOf(allocs, "original_forecast_qty"), appr, apprRolled, ord, sold, recom, trade,
+    fq: sold > 0 ? Math.round(sold / appr * 100) : null,
+    adopt: recom > 0 ? Math.round(ord / recom * 100) : null,
+    disc: n ? Math.round(disc / n) : null, cover: trade > 0 ? Math.round(appr / trade * 100) : null,
+    otif: n ? Math.round(otif / n) : null, avail: n ? Math.round(avail / n) : null,
+    shrink: n ? (shrink / n).toFixed(1) : null,
+  };
+}
+function aggKpiChips(m, adoptW) {
+  const chip = (v, l) => `<div class="chip"><div class="c-val">${v}</div><div class="c-lbl">${l}</div></div>`;
+  return `<div class="chips">${chip(m.storeCount, "סניפים")}${chip(m.promoCount, "מבצעים")}
+    ${chip(m.disc == null ? "—" : m.disc + "%", "% הנחה")}${chip(m.fq == null ? "—" : m.fq + "%", "איכות חיזוי")}
+    ${chip(m.adopt == null ? "—" : m.adopt + "%", "אימוץ סניפים")}${chip(adoptW == null ? "—" : adoptW + "%", "אימוץ מחסנים")}
+    ${chip(m.cover == null ? "—" : m.cover + "%", "כיסוי הסכם")}${chip(m.otif == null ? "—" : m.otif + "%", "OTIF")}
+    ${chip(m.avail == null ? "—" : m.avail + "%", "זמינות")}${chip(m.shrink == null ? "—" : m.shrink + "%", "פחת")}</div>`;
+}
+function aggBreakdown(allocs, pmap, keyFn, labelFn, openFn, colTitle) {
+  let rows = "";
+  for (const [k, arr] of groupMap(allocs, keyFn)) {
+    const m = aggMetrics(arr, pmap, null);
+    rows += `<tr class="clickable" data-open="${esc(openFn(k))}">
+      <td><span dir="auto">${esc(labelFn(k))}</span></td><td class="num">${m.storeCount}</td>
+      <td class="num">${num(m.orig)}</td><td class="num">${num(m.appr)}</td><td class="num">${num(m.ord)}</td>
+      <td class="num">${m.sold ? num(m.sold) : "—"}</td>
+      <td class="num">${m.fq == null ? "—" : `<span class="badge ${fqTone(m.fq)}">${m.fq}%</span>`}</td>
+      <td class="num">${m.adopt == null ? "—" : `<span class="badge ${adoptTone(m.adopt)}">${m.adopt}%</span>`}</td></tr>`;
+  }
+  return `<h4>${esc(colTitle)} — לחיצה לפירוט</h4><div class="table-wrap"><table class="data"><thead><tr><th>${esc(colTitle)}</th><th class="num">סניפים</th><th class="num">מקורי</th><th class="num">מאושר</th><th class="num">הוזמן</th><th class="num">נמכר</th><th class="num">איכות</th><th class="num">אימוץ</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+function openAggPopup(spec) {
+  const ci = spec.indexOf(":"); const kind = spec.slice(0, ci), arg = spec.slice(ci + 1);
+  const { allocs, whsup, pmap } = promoScope();
+  let na, nw, title, fmt = null, breakdown = "";
+  if (kind === "fmt") {
+    fmt = arg;
+    na = allocs.filter((a) => a.format_code === arg);
+    nw = whsup.filter((w) => pmap[w.promo_id] && pmap[w.promo_id].format_code === arg);
+    title = "פורמט · " + formatName(arg);
+    breakdown = aggBreakdown(na, pmap, (a) => a.vendor_id, (v) => LK.vendors[v] || v, (v) => "ven:" + arg + "|" + v, "ספקים");
+  } else if (kind === "ven") {
+    const [f, v] = arg.split("|");
+    na = allocs.filter((a) => a.format_code === f && a.vendor_id === v);
+    nw = whsup.filter((w) => w.vendor_id === v && pmap[w.promo_id] && pmap[w.promo_id].format_code === f);
+    title = "ספק · " + (LK.vendors[v] || v) + " · " + formatName(f);
+    breakdown = aggBreakdown(na, pmap, (a) => a.display_type_code, (dd) => displayName(dd), (dd) => "disp:" + f + "|" + v + "|" + dd, "אמצעי תצוגה");
+  } else {
+    const [f, v, dd] = arg.split("|");
+    na = allocs.filter((a) => a.format_code === f && a.vendor_id === v && a.display_type_code === dd);
+    nw = whsup.filter((w) => { const p = pmap[w.promo_id]; return p && p.format_code === f && p.display_type_code === dd && w.vendor_id === v; });
+    title = displayName(dd) + " · " + (LK.vendors[v] || v) + " · " + formatName(f);
+    breakdown = aggBreakdown(na, pmap, (a) => a.promo_id, (pid) => pmap[pid] ? pmap[pid].description : pid, (pid) => "promo:" + pid, "מבצעים");
+  }
+  const override = fmt != null ? state._approvedOverride[fmt] : null;
+  const m = aggMetrics(na, pmap, override);
+  const adoptW = sumOf(nw, "wh_recommended_qty") > 0 ? Math.round(sumOf(nw, "wh_ordered_qty") / sumOf(nw, "wh_recommended_qty") * 100) : null;
+  const weak = m.trade > 0 && m.appr < m.trade;
+  const maxF = Math.max(m.orig, m.appr, m.trade, 1);
+  const bar = (label, val, color) => `<div style="margin:7px 0"><div style="display:flex;justify-content:space-between;font-size:12px"><span>${label}</span><span class="strong">${num(val)}</span></div><div class="bar" style="height:10px"><i style="width:${Math.round(val / maxF * 100)}%;background:${color}"></i></div></div>`;
+  let body = "";
+  if (fmt != null) {
+    const cur = override != null ? override : m.apprRolled;
+    body += `<h4>חיזוי מאושר — רמת פורמט</h4><div class="card" style="background:var(--bg-2)">
+      <div class="card-sub" style="margin-bottom:8px">מנהל שרשרת האספקה מאשר חיזוי לתקופה ברמת הפורמט בלבד. הערך מזין כיסוי הסכם מסחרי ואיכות חיזוי בכל הרמות שמתחת.</div>
+      ${bar("חיזוי מקורי (ספק)", m.orig, "#64748b")}${bar("חיזוי מאושר", m.appr, "#6366f1")}${m.trade ? bar("הסכם מסחרי", m.trade, weak ? "#ef4444" : "#22c55e") : ""}
+      <div style="display:flex;gap:10px;align-items:center;margin-top:12px;flex-wrap:wrap">
+        <label style="font-size:13px;color:var(--text-dim)">חיזוי מאושר (יח'):</label>
+        <input class="search" style="max-width:180px" type="number" min="0" step="100" value="${cur}" data-approved-fmt="${esc(fmt)}" />
+        <span class="mut" style="font-size:12px">${override != null ? "נקבע ידנית" : "ברירת מחדל = סכום מאושר מצטבר"}</span>
+      </div>
+      ${weak ? `<div class="login-error" style="margin-top:10px">⚠ החיזוי המאושר נמוך מההסכם המסחרי — נדרש חיזוק.</div>` : ""}</div>`;
+  }
+  body += `<h4>מדדים</h4>${aggKpiChips(m, adoptW)}${breakdown}`;
+  openModal(esc(title), `${m.promoCount} מבצעים · ${m.storeCount} סניפים`, body);
+  if (fmt != null) {
+    const inp = document.querySelector("#modal-root [data-approved-fmt]");
+    if (inp) inp.addEventListener("change", () => {
+      const v = parseFloat(inp.value);
+      if (isNaN(v)) delete state._approvedOverride[fmt]; else state._approvedOverride[fmt] = v;
+      renderPromo();
+      openAggPopup(spec);
+    });
+  }
 }
 
 function renderPromo() {
@@ -581,7 +669,8 @@ function renderPromo() {
   const sel = (key, label, opts, fmtFn) => `<select class="select" data-pf="${key}"><option value="">${label}</option>${opts.map((o) => `<option value="${esc(o)}" ${F[key] === o ? "selected" : ""}>${esc(fmtFn ? fmtFn(o) : o)}</option>`).join("")}</select>`;
   const buckets = PROMO_BUCKETS.map(([k, lbl]) => `<button class="btn ${F.bucket === k ? "btn-primary" : "btn-ghost"}" data-bucket="${k}" style="width:auto">${lbl}</button>`).join("");
 
-  const apprT = sumOf(allocs, "approved_forecast_qty");
+  let apprT = 0;
+  for (const [f, arr] of groupMap(allocs, (a) => a.format_code)) apprT += (state._approvedOverride[f] != null ? Number(state._approvedOverride[f]) : sumOf(arr, "approved_forecast_qty"));
   const ordT = sumOf(allocs, "store_ordered_qty"), soldT = sumOf(allocs, "sold_qty"), recomT = sumOf(allocs, "store_recommended_qty");
   const whRecom = sumOf(whsup, "wh_recommended_qty"), whOrd = sumOf(whsup, "wh_ordered_qty");
   const avgDisc = scoped.length ? Math.round(scoped.reduce((a, p) => a + (p._disc || 0), 0) / scoped.length) : 0;
@@ -607,8 +696,8 @@ function renderPromo() {
 
   const tree = buildPromoTree(allocs, pmap);
   const treeRows = tree.map(renderPromoNode).join("");
-  const header = `<tr><th>פורמט / אמצעי תצוגה / מבצע / פריט·סניף</th><th class="num">סניפים</th><th class="num">חיזוי מקורי</th><th class="num">חיזוי מאושר</th><th class="num">הוזמן</th><th class="num">נמכר</th><th class="num">איכות חיזוי</th><th class="num">אימוץ</th><th class="num">הסכם מסחרי</th><th>התראה</th></tr>`;
-  const banner = F.bucket === "next2w" ? `<div class="card" style="border-color:${atRisk ? "var(--bad)" : "var(--border)"};margin-bottom:16px"><div style="display:flex;gap:24px;align-items:center;flex-wrap:wrap"><div><div class="c-val" style="font-size:26px">${scoped.length}</div><div class="c-lbl">מבצעים ב-14 הימים הקרובים — לטיפול מיידי</div></div>${atRisk ? `<div style="color:#fca5a5"><div class="c-val" style="font-size:26px">${atRisk}</div><div class="c-lbl">⚠ חלשים מול הסכם מסחרי</div></div>` : ""}<div class="mut" style="flex:1;text-align:end;min-width:200px">אגרגציה: פורמט → אמצעי תצוגה → מבצע → פריט·סניף · לחיצה על מבצע לפירוט מלא</div></div></div>` : "";
+  const header = `<tr><th>פורמט → ספק → אמצעי תצוגה → מבצע</th><th class="num">סניפים</th><th class="num">חיזוי מקורי</th><th class="num">חיזוי מאושר</th><th class="num">הוזמן</th><th class="num">נמכר</th><th class="num">איכות חיזוי</th><th class="num">אימוץ</th><th class="num">הסכם מסחרי</th><th>התראה</th></tr>`;
+  const banner = F.bucket === "next2w" ? `<div class="card" style="border-color:${atRisk ? "var(--bad)" : "var(--border)"};margin-bottom:16px"><div style="display:flex;gap:24px;align-items:center;flex-wrap:wrap"><div><div class="c-val" style="font-size:26px">${scoped.length}</div><div class="c-lbl">מבצעים ב-14 הימים הקרובים — לטיפול מיידי</div></div>${atRisk ? `<div style="color:#fca5a5"><div class="c-val" style="font-size:26px">${atRisk}</div><div class="c-lbl">⚠ חלשים מול הסכם מסחרי</div></div>` : ""}<div class="mut" style="flex:1;text-align:end;min-width:200px">אגרגציה: פורמט → ספק → אמצעי תצוגה → מבצע · לחיצה על כל רמה לפירוט ומדדים</div></div></div>` : "";
 
   root.innerHTML = `
     <div class="card-sub" style="margin-bottom:14px">פעילות שוטפת (יוניברס) — תכנון תפעולי end-to-end: חיזוי מקורי מול מאושר, הזמנה מול המלצה (אימוץ), מכר מול חיזוי, והסכם מסחרי מול חוזק המבצע.</div>
@@ -908,6 +997,8 @@ const DRILL = {
       { key: "store_recommended_qty", label: "המלצה", num: true, render: (r) => num(r.store_recommended_qty) },
       { key: "store_ordered_qty", label: "הוזמן", num: true, render: (r) => num(r.store_ordered_qty) },
       { key: "sold_qty", label: "נמכר", num: true, render: (r) => r.sold_qty ? num(r.sold_qty) : "—" },
+      { key: "_fq", label: "איכות", num: true, render: (r) => { const s = Number(r.sold_qty || 0), a = Number(r.approved_forecast_qty || 0); const q = s > 0 && a > 0 ? Math.round(s / a * 100) : null; return q == null ? "—" : `<span class="badge ${fqTone(q)}">${q}%</span>`; } },
+      { key: "_ad", label: "אימוץ", num: true, render: (r) => { const o = Number(r.store_ordered_qty || 0), rc = Number(r.store_recommended_qty || 0); const q = rc > 0 ? Math.round(o / rc * 100) : null; return q == null ? "—" : `<span class="badge ${adoptTone(q)}">${q}%</span>`; } },
     ];
     body += `<h4>מגוון סניפי (${allocs.length})</h4>` + tableHTML(acols, allocs);
     if (whsup.length) {
@@ -1111,6 +1202,15 @@ document.addEventListener("click", (e) => {
   if (nav) { navigate(nav.dataset.route); return; }
   if (e.target.closest("#logout")) { logout(); }
 });
+// breakdown links inside popups (format/vendor/display drill-through)
+(function () {
+  const mr = document.getElementById("modal-root");
+  if (mr) mr.addEventListener("click", (e) => {
+    if (e.target.closest("[data-close]")) return;
+    const o = e.target.closest("[data-open]");
+    if (o) { const s = o.dataset.open; s.startsWith("promo:") ? DRILL.promo(s.slice(6)) : openAggPopup(s); }
+  });
+})();
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
 window.addEventListener("hashchange", () => {
   if (!state.token) return;
