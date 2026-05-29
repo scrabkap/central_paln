@@ -855,6 +855,9 @@ const CAN_DEFAULT_RATE = 0.15;
 const CAN_BYDESIGN = "USER_PARALLEL_BY_DESIGN";
 const canStore = () => (state._canEdit = state._canEdit || {});
 const canSeeds = () => (state._canSeed = state._canSeed || {});
+// deterministic placeholder on-hand stock (no live inventory feed in the POC)
+const canStockSeed = (kind, bc, base) =>
+  Math.round(base * (kind === "wh" ? 0.18 + 0.22 * hashFrac("whstk#" + bc) : 0.05 + 0.10 * hashFrac("ststk#" + bc)));
 
 function canInitWorking(d) {
   const store = canStore(), seeds = canSeeds();
@@ -862,10 +865,14 @@ function canInitWorking(d) {
   (d.members || []).forEach((m) => { (byTree[m.tree_id] = byTree[m.tree_id] || []).push(m); });
   (d.trees || []).forEach((t) => {
     if (store[t.tree_id]) return; // keep this session's edits
-    const ms = (byTree[t.tree_id] || []).map((m) => ({
-      barcode: m.item_barcode, desc: m.item_desc, vendor_id: m.vendor_id,
-      base: Number(m.baseline_forecast_qty || 0), influence: Number(m.influence_percent || 0),
-    }));
+    const ms = (byTree[t.tree_id] || []).map((m) => {
+      const base = Number(m.baseline_forecast_qty || 0);
+      return {
+        barcode: m.item_barcode, desc: m.item_desc, vendor_id: m.vendor_id,
+        base, influence: Number(m.influence_percent || 0),
+        locked: false, whStock: canStockSeed("wh", m.item_barcode, base), storeStock: canStockSeed("st", m.item_barcode, base),
+      };
+    });
     const w = {
       tree_id: t.tree_id, tree_type: t.tree_type, status: t.status, notes: t.notes,
       created_by: t.created_by, approved_by: t.approved_by, source_suggestion_id: t.source_suggestion_id || null,
@@ -908,6 +915,73 @@ function canSplit(c) {
     `<span style="width:${m.sharePct}%;background:${m.color}" title="${esc(m.desc)} · ${Math.round(m.sharePct)}%"></span>`).join("");
 }
 const canDelta = (dv) => `<span style="color:${dv > 0 ? "var(--state-good)" : dv < 0 ? "var(--state-bad)" : "var(--text-mut)"}">${dv > 0 ? "+" : ""}${num(dv)}</span>`;
+const canSigned = (n) => (n > 0 ? "+" : "") + num(n);
+
+/* ---- hero flow (RTL Sankey: base on the right → adjusted on the left) ---- */
+function canRibbon(rx, rTop, rBot, lx, lTop, lBot) {
+  const mid = (rx + lx) / 2;
+  return `M ${rx} ${rTop} C ${mid} ${rTop}, ${mid} ${lTop}, ${lx} ${lTop} L ${lx} ${lBot} C ${mid} ${lBot}, ${mid} ${rBot}, ${rx} ${rBot} Z`;
+}
+function canFlowSVG(c) {
+  const W = 760, H = 360, padTop = 44, chartH = 250, barW = 14;
+  const rInner = 612, lOuter = 150, lInner = lOuter + barW;
+  const scale = chartH / Math.max(c.groupBase, 1);
+  const isLoss = c.loss > 0;
+  let ry = padTop, ly = padTop;
+  const segs = c.members.map((m) => {
+    const seg = { m, rTop: ry, rBot: ry + m.base * scale, lTop: ly, lBot: ly + m.adjusted * scale };
+    ry += m.base * scale; ly += m.adjusted * scale; return seg;
+  });
+  const baseBottom = padTop + c.groupBase * scale, adjBottom = padTop + c.groupAdjusted * scale;
+  let s = `<svg viewBox="0 0 ${W} ${H}" class="can-flow-svg" preserveAspectRatio="xMidYMid meet">`;
+  s += `<defs><linearGradient id="canLossGrad" x1="1" y1="0" x2="0" y2="0"><stop offset="0" stop-color="#E5556A" stop-opacity=".05"/><stop offset="1" stop-color="#E5556A" stop-opacity=".34"/></linearGradient></defs>`;
+  s += `<text x="${rInner + barW / 2}" y="24" class="can-flow-axis" text-anchor="middle">חיזוי בסיס מצרפי</text>`;
+  s += `<text x="${rInner + barW / 2}" y="${baseBottom + 24}" class="can-flow-val prov" text-anchor="middle">${num(c.groupBase)}</text>`;
+  s += `<text x="${lOuter + barW / 2}" y="24" class="can-flow-axis" text-anchor="middle">חיזוי מתואם</text>`;
+  s += `<text x="${lOuter + barW / 2}" y="${adjBottom + 24}" class="can-flow-val appr" text-anchor="middle">${num(c.groupAdjusted)}</text>`;
+  if (isLoss) {
+    const mid = (rInner + lInner) / 2, ly2 = (adjBottom + baseBottom) / 2 + 4;
+    s += `<path d="M ${rInner} ${baseBottom} C ${mid} ${baseBottom}, ${mid} ${adjBottom}, ${lInner} ${adjBottom} L ${lInner} ${baseBottom} Z" fill="url(#canLossGrad)"/>`;
+    s += `<text x="${mid}" y="${ly2}" class="can-flow-loss" text-anchor="middle">▼ אובדן קניבליזציה</text>`;
+    s += `<text x="${mid}" y="${ly2 + 16}" class="can-flow-lossv" text-anchor="middle">−${num(c.loss)} · ${Math.round(c.rate * 100)}%</text>`;
+  }
+  segs.forEach((sg) => {
+    s += `<path class="can-ribbon" d="${canRibbon(rInner, sg.rTop, sg.rBot, lInner, sg.lTop, sg.lBot)}" fill="${sg.m.color}" fill-opacity=".42"><title>${esc(sg.m.desc)}\nבסיס ${num(sg.m.base)} → מתואם ${num(sg.m.adjusted)} (${canSigned(sg.m.delta)})</title></path>`;
+  });
+  segs.forEach((sg) => {
+    s += `<rect x="${rInner}" y="${sg.rTop}" width="${barW}" height="${Math.max(sg.rBot - sg.rTop, 0)}" fill="${sg.m.color}" rx="2"/>`;
+    if (sg.lBot - sg.lTop > 0.5) s += `<rect x="${lOuter}" y="${sg.lTop}" width="${barW}" height="${sg.lBot - sg.lTop}" fill="${sg.m.color}" rx="2"/>`;
+  });
+  if (isLoss) s += `<rect x="${lOuter}" y="${adjBottom}" width="${barW}" height="${Math.max(baseBottom - adjBottom, 0)}" fill="#E5556A" rx="2"/>`;
+  return s + `</svg>`;
+}
+/* ---- volume balance waterfall (base → loss → adjusted) ---- */
+function canWaterfall(c) {
+  const W = 320, H = 150, padL = 8, padR = 8, base = 116, bw = 56;
+  const slot = (W - padL - padR) / 3, max = Math.max(c.groupBase, 1);
+  const h = (v) => (v / max) * 92, cx = (i) => padL + slot * i + slot / 2;
+  const baseH = h(c.groupBase), adjH = h(c.groupAdjusted), lossH = baseH - adjH;
+  let s = `<svg viewBox="0 0 ${W} ${H}" class="can-wf-svg" preserveAspectRatio="xMidYMid meet">`;
+  s += `<rect x="${cx(0) - bw / 2}" y="${base - baseH}" width="${bw}" height="${baseH}" rx="3" fill="var(--role-provider)" fill-opacity=".85"/>`;
+  s += `<text x="${cx(0)}" y="${base - baseH - 6}" class="can-wf-num" text-anchor="middle">${num(c.groupBase)}</text>`;
+  s += `<text x="${cx(0)}" y="${base + 16}" class="can-wf-lbl" text-anchor="middle">בסיס</text>`;
+  if (c.loss > 0) {
+    s += `<rect x="${cx(1) - bw / 2}" y="${base - baseH}" width="${bw}" height="${lossH}" rx="3" fill="var(--bad)" fill-opacity=".8"/>`;
+    s += `<text x="${cx(1)}" y="${base - baseH - 6}" class="can-wf-num bad" text-anchor="middle">−${num(c.loss)}</text>`;
+    s += `<text x="${cx(1)}" y="${base + 16}" class="can-wf-lbl" text-anchor="middle">אובדן</text>`;
+    s += `<line x1="${cx(0) + bw / 2}" y1="${base - baseH}" x2="${cx(1) - bw / 2}" y2="${base - baseH}" class="can-wf-conn"/>`;
+    s += `<line x1="${cx(1) + bw / 2}" y1="${base - adjH}" x2="${cx(2) - bw / 2}" y2="${base - adjH}" class="can-wf-conn"/>`;
+  } else {
+    s += `<text x="${cx(1)}" y="${base - 42}" class="can-wf-keep" text-anchor="middle">נפח נשמר</text>`;
+    s += `<text x="${cx(1)}" y="${base - 26}" class="can-wf-keep" text-anchor="middle">ללא אובדן</text>`;
+    s += `<line x1="${cx(0) + bw / 2}" y1="${base - baseH}" x2="${cx(2) - bw / 2}" y2="${base - adjH}" class="can-wf-conn"/>`;
+  }
+  s += `<rect x="${cx(2) - bw / 2}" y="${base - adjH}" width="${bw}" height="${adjH}" rx="3" fill="var(--role-approved)" fill-opacity=".9"/>`;
+  s += `<text x="${cx(2)}" y="${base - adjH - 6}" class="can-wf-num appr" text-anchor="middle">${num(c.groupAdjusted)}</text>`;
+  s += `<text x="${cx(2)}" y="${base + 16}" class="can-wf-lbl" text-anchor="middle">מתואם</text>`;
+  s += `<line x1="${padL}" y1="${base}" x2="${W - padR}" y2="${base}" class="can-wf-base"/>`;
+  return s + `</svg>`;
+}
 
 PAGES.cannibalization = async () => {
   const d = await load("/api/cannibalization");
@@ -984,9 +1058,11 @@ function canAcceptSuggestion(sid) {
   if (!store[tid]) {
     const members = (s.member_barcodes || []).map((bc, i) => {
       const it = LK.items[bc];
+      const base = Math.round(2500 + 4000 * hashFrac("canbase#" + bc));
       return { barcode: bc, desc: (s.member_descs && s.member_descs[i]) || (it && it.description) || bc,
         vendor_id: it ? it.original_vendor_id : null,
-        base: Math.round(2500 + 4000 * hashFrac("canbase#" + bc)), influence: i === 0 ? 55 : 45 };
+        base, influence: i === 0 ? 55 : 45,
+        locked: false, whStock: canStockSeed("wh", bc, base), storeStock: canStockSeed("st", bc, base) };
     });
     const w = { tree_id: tid, tree_type: "VENDOR_SUGGESTED_MISTAKE", status: "DRAFT",
       notes: (s.member_descs || []).join(" ↔ "), created_by: "forecast.svc", approved_by: null,
@@ -1023,19 +1099,26 @@ function drawCanEditor(view) {
     <td><div class="can-slider-row"><input type="range" min="0" max="100" value="${Math.round(m.influence)}" data-canw="${m.i}"><span class="can-share-val" id="can-share-${m.i}">${Math.round(m.sharePct)}%</span></div></td>
     <td class="num role-num approved" id="can-adj-${m.i}">${num(m.adjusted)}</td>
     <td class="num" id="can-delta-${m.i}">${canDelta(m.delta)}</td>
+    <td class="num">${num(m.whStock)}</td>
+    <td class="num">${num(m.storeStock)}</td>
+    <td style="text-align:center"><button class="can-lock ${m.locked ? "on" : ""}" data-canlock="${m.i}" title="נעילה/פתיחה להזמנה — נשמר על המגוון ברמת הפורמט; אינו משפיע על החיזוי">${m.locked ? "🔒 נעול" : "🔓 פתוח"}</button></td>
   </tr>`).join("");
+  const totWh = c.members.reduce((a, m) => a + Number(m.whStock || 0), 0);
+  const totStore = c.members.reduce((a, m) => a + Number(m.storeStock || 0), 0);
 
   const editor = `<div class="card-head" style="margin-top:2px"><div><h3>חלוקת השפעה בין הפריטים</h3>
       <div class="card-sub" style="margin:0">גרור את ההשפעה לשינוי חלוקת החיזוי — הכל מתעדכן מיידית.${isBD ? " הנפח הכולל נשמר; אתה רק מעביר נפח בין הספקים." : ""}</div></div>
       <button class="btn btn-ghost" style="width:auto" data-canequal>⚖ חלוקה שווה</button></div>
     <div class="can-split" id="can-split-preview" style="height:12px;margin:2px 0 14px">${canSplit(c)}</div>
     <div class="table-wrap"><table class="data can-members"><thead><tr>
-      <th>פריט · ספק</th><th class="num">חיזוי בסיס</th><th>השפעה (חלק בקבוצה)</th><th class="num">חיזוי מתואם</th><th class="num">דלתא מול בסיס</th>
+      <th>פריט · ספק</th><th class="num">חיזוי בסיס</th><th>השפעה (חלק בקבוצה)</th><th class="num">חיזוי מתואם</th><th class="num">דלתא מול בסיס</th><th class="num">מלאי מחסן</th><th class="num">מלאי סניפים</th><th style="text-align:center">נעול להזמנה</th>
     </tr></thead><tbody>${memRows}</tbody><tfoot><tr>
       <td class="strong">סה"כ</td><td class="num role-num provider">${num(c.groupBase)}</td><td></td>
       <td class="num role-num approved" id="can-group-adj">${num(c.groupAdjusted)}</td>
       <td class="num strong" id="can-group-loss" style="color:var(--state-bad)">${c.loss > 0 ? "−" + num(c.loss) : "—"}</td>
-    </tr></tfoot></table></div>`;
+      <td class="num">${num(totWh)}</td><td class="num">${num(totStore)}</td><td></td>
+    </tr></tfoot></table></div>
+    <div class="mut" style="font-size:11.5px;margin-top:8px">🔒 נעילה להזמנה נשמרת על המגוון (assortment) ברמת הפורמט — חוסמת הזמנות לפריט אך אינה משפיעה על חישוב החיזוי. מלאי מחסן/סניפים מוצג לסיוע בתכנון ההחלפה ההדרגתית.</div>`;
 
   const fmts = (state._master && state._master.formats) || [];
   const fmtChips = fmts.map((f) => `<span class="can-fmt ${w.formats.includes(f.format_code) ? "on" : ""}" data-canfmt="${esc(f.format_code)}">${esc(f.description)}</span>`).join("");
@@ -1063,6 +1146,11 @@ function drawCanEditor(view) {
       <span class="pd-back" data-route="cannibalization">← חזרה לרשימת העצים</span>
       <h2><span dir="auto">${esc(w.notes || w.tree_id)}</span> ${typePill} ${statusPill}</h2>
       <div class="pd-meta"><span dir="auto">${esc(canVendors(w))}</span><span class="sep">·</span>${w.members.length} פריטים<span class="sep">·</span><span class="num">${esc(w.tree_id)}</span>${w.source_suggestion_id ? `<span class="sep">·</span>מקור: ${esc(w.source_suggestion_id)}` : ""}</div></div>
+    <div class="pd-zone"><div class="pd-zone-title">חלוקת החיזוי — מהבסיס אל הפריטים${isBD ? "" : ", וכמה נגרע בדרך"}</div>
+      <div class="can-flow-grid">
+        <div class="can-flow-host" id="can-flow">${canFlowSVG(c)}</div>
+        <div class="can-wf-card"><div class="can-wf-title">מאזן נפח</div><div class="can-wf-host" id="can-wf">${canWaterfall(c)}</div></div>
+      </div></div>
     <div class="pd-zone"><div class="pd-zone-title">עורך החלוקה</div>${editor}</div>
     ${replaceZone}
     <div class="pd-zone"><div class="pd-zone-title">בריאות ההחלטה</div><div class="health-grid ace-health" id="can-health">${canHealth(c)}</div></div>
@@ -1093,6 +1181,8 @@ function canRefreshLive(view) {
     const dl = view.querySelector("#can-delta-" + m.i); if (dl) dl.innerHTML = canDelta(m.delta);
   });
   const sp = view.querySelector("#can-split-preview"); if (sp) sp.innerHTML = canSplit(c);
+  const fh = view.querySelector("#can-flow"); if (fh) fh.innerHTML = canFlowSVG(c);
+  const wf = view.querySelector("#can-wf"); if (wf) wf.innerHTML = canWaterfall(c);
   const ga = view.querySelector("#can-group-adj"); if (ga) ga.textContent = num(c.groupAdjusted);
   const gl = view.querySelector("#can-group-loss"); if (gl) gl.textContent = c.loss > 0 ? "−" + num(c.loss) : "—";
   const rl = view.querySelector("#can-rate-loss"); if (rl) rl.textContent = "−" + num(c.loss);
@@ -1108,6 +1198,10 @@ function attachCanHandlers(view) {
   }));
   const rate = view.querySelector("[data-canrate]");
   if (rate) rate.addEventListener("input", () => { w().cannibRate = Number(rate.value) / 100; canRefreshLive(view); });
+  view.querySelectorAll("[data-canlock]").forEach((el) => el.addEventListener("click", () => {
+    const m = w().members[Number(el.dataset.canlock)]; m.locked = !m.locked; // ordering lock only — no effect on the forecast
+    el.classList.toggle("on", m.locked); el.textContent = m.locked ? "🔒 נעול" : "🔓 פתוח";
+  }));
   view.querySelectorAll("[data-canfmt]").forEach((el) => el.addEventListener("click", () => {
     const f = w().formats, code = el.dataset.canfmt, idx = f.indexOf(code);
     idx >= 0 ? f.splice(idx, 1) : f.push(code); el.classList.toggle("on");
