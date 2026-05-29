@@ -3,7 +3,7 @@
    ============================================================ */
 "use strict";
 
-const API = "/api";
+const API = ""; // paths already include the /api prefix (served same-origin via CloudFront)
 const state = {
   token: localStorage.getItem("cp_token") || "",
   user: localStorage.getItem("cp_user") || "",
@@ -65,6 +65,8 @@ const STATUS_HE = {
   WAITING_QC: "ממתין לבקרה", WAITING_DISTRIBUTION: "ממתין להפצה", DISTRIBUTED: "הופץ",
   QUEUED_TONIGHT: "יופץ בלילה", ADOPTED: "אומץ", MODIFIED: "שונה", PENDING: "ממתין",
   REJECTED: "נדחה", APPLIED: "הוחל", CALCULATED: "חושב", DRAFT: "טיוטה",
+  SUBMITTED: "נשלח", CONFIRMED: "אושר", IN_TRANSIT: "בדרך", DELIVERED: "סופק", CANCELLED: "בוטל",
+  ORDERED: "הוזמן", PLANNED: "מתוכנן", RECEIVED: "התקבל",
   ACES: "אסים", REGULAR_UNIVERSE: "פעילות שוטפת",
   USER_PARALLEL_BY_DESIGN: "מקבילי מתוכנן", VENDOR_SUGGESTED_MISTAKE: "הצעת ספק",
 };
@@ -202,6 +204,23 @@ function closeModal() { $("#modal-root").innerHTML = ""; }
 
 const spinner = `<div class="loader"><div class="spinner"></div></div>`;
 
+function chipsRow(pairs) {
+  return `<div class="chips">` + pairs.map((p) =>
+    `<div class="chip"><div class="c-val">${p[1]}</div><div class="c-lbl">${esc(p[0])}</div></div>`
+  ).join("") + `</div>`;
+}
+const ADOPT_COLOR = { ADOPTED: "#22c55e", MODIFIED: "#38bdf8", PENDING: "#f59e0b", REJECTED: "#ef4444" };
+function adoptionBars(rows) {
+  return ["ADOPTED", "MODIFIED", "PENDING", "REJECTED"].map((s) => ({
+    label: STATUS_HE[s], color: ADOPT_COLOR[s],
+    value: rows.filter((r) => r.adoption_status === s).length,
+  }));
+}
+function chartCard(title, inner) {
+  return `<div class="card"><div class="card-head"><h3>${title}</h3></div>${inner}</div>`;
+}
+const sumBy = (rows, key) => rows.reduce((a, r) => a + Number(r[key] || 0), 0);
+
 /* ---------------- pages ---------------- */
 const PAGES = {};
 
@@ -260,6 +279,14 @@ PAGES["wh-mrp"] = async () => {
     <div class="chip"><div class="c-val">${avgDays}</div><div class="c-lbl">ממוצע ימי מלאי</div></div>
     <div class="chip"><div class="c-val">${cur.length}</div><div class="c-lbl">שורות המלצה</div></div>
   </div>`;
+  const whAgg = whs.map((w) => ({
+    label: "מחסן " + w, color: "#8b5cf6",
+    value: Math.round(sumBy(cur.filter((r) => r.warehouse_id === w), "recom_qty_base")),
+  }));
+  const charts = `<div class="section row cols-2">
+    ${chartCard(`כמות מומלצת לפי מחסן (${sdate(latest)})`, vbars(whAgg))}
+    ${chartCard("פילוח אימוץ המלצות", vbars(adoptionBars(cur)))}
+  </div>`;
   const filters = `<div class="filters">
     <select class="select" id="f-date">${dates.map((x) => `<option value="${x}">${sdate(x)}</option>`).join("")}</select>
     <select class="select" id="f-wh"><option value="">כל המחסנים</option>${whs.map((x) => `<option value="${x}">מחסן ${x}</option>`).join("")}</select>
@@ -267,7 +294,7 @@ PAGES["wh-mrp"] = async () => {
     <div class="spacer"></div><span class="count-tag" id="cnt"></span>
   </div>`;
   return `<div class="card-sub" style="margin-bottom:16px">MRP קלאסי — חישוב יומי לפריטים פעילים במגוון בשיטת אספקה 2 (מחסן), מונע מטבלת 9-BOX.</div>
-    ${chips}<div class="section">${filters}<div id="grid"></div></div>`;
+    ${chips}${charts}<div class="section">${filters}<div id="grid"></div></div>`;
 };
 PAGES["wh-mrp"].after = () => {
   const cols = [
@@ -299,6 +326,23 @@ PAGES["store-mrp"] = async () => {
   state._storemrp = rows;
   const dates = [...new Set(rows.map((r) => r.snapshot_date))].sort().reverse();
   const stores = [...new Set(rows.map((r) => r.store_id))].sort();
+  const latest = dates[0];
+  const cur = rows.filter((r) => r.snapshot_date === latest);
+  const adoptRate = cur.length ? Math.round(100 * cur.filter((r) => r.adoption_status === "ADOPTED").length / cur.length) : 0;
+  const tiles = chipsRow([
+    [`סה"כ מומלץ (${sdate(latest)})`, num(Math.round(sumBy(cur, "recom_qty_base")))],
+    ["אחוז אימוץ", adoptRate + "%"],
+    ["סניפים פעילים", String(new Set(cur.map((r) => r.store_id)).size)],
+    ["שורות המלצה", String(cur.length)],
+  ]);
+  const supAgg = [
+    { label: "מחסן", color: "#8b5cf6", value: Math.round(sumBy(cur.filter((r) => r.supply_method === "WH"), "recom_qty_base")) },
+    { label: "ישיר", color: "#22d3ee", value: Math.round(sumBy(cur.filter((r) => r.supply_method === "DIRECT"), "recom_qty_base")) },
+  ];
+  const charts = `<div class="section row cols-2">
+    ${chartCard("כמות מומלצת לפי שיטת אספקה", vbars(supAgg))}
+    ${chartCard("פילוח אימוץ המלצות", vbars(adoptionBars(cur)))}
+  </div>`;
   const filters = `<div class="filters">
     <select class="select" id="f-date">${dates.map((x) => `<option value="${x}">${sdate(x)}</option>`).join("")}</select>
     <select class="select" id="f-store"><option value="">כל הסניפים</option>${stores.map((x) => `<option value="${x}">${esc(storeName(x))}</option>`).join("")}</select>
@@ -306,7 +350,7 @@ PAGES["store-mrp"] = async () => {
     <div class="spacer"></div><span class="count-tag" id="cnt"></span>
   </div>`;
   return `<div class="card-sub" style="margin-bottom:16px">MRP סניף — חישוב לכל יום הזמנה ברמת פריט מוביל. המלצה = מלאי תפעולי + מלאי בדרך − מלאי ביטחון − חיזוי לתקופת הכיסוי.</div>
-    <div class="section">${filters}<div id="grid"></div></div>`;
+    ${tiles}${charts}<div class="section">${filters}<div id="grid"></div></div>`;
 };
 PAGES["store-mrp"].after = () => {
   const cols = [
@@ -349,8 +393,27 @@ PAGES["central-planner"] = async () => {
     { key: "status", label: "סטטוס", render: (r) => badge(r.status) },
   ];
   const runs = (d.runs || []).slice().sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+  const allocs = d.allocations || [];
+  const tiles = chipsRow([
+    ["חלוקות", String(runs.length)],
+    ["הוחלו", String(runs.filter((r) => r.status === "APPLIED").length)],
+    ["בטיוטה/חישוב", String(runs.filter((r) => r.status !== "APPLIED").length)],
+    ['סה"כ כמות סופית', num(Math.round(sumBy(allocs, "final_qty")))],
+  ]);
+  const runAgg = runs.map((r) => ({
+    label: r.run_id.replace("RUN-", "#"), color: "#6366f1",
+    value: Math.round(sumBy(allocs.filter((a) => a.run_id === r.run_id), "final_qty")),
+  }));
+  const forceAgg = runs.map((r) => ({
+    label: r.run_id.replace("RUN-", "#"), color: "#8b5cf6",
+    value: Math.round(sumBy(allocs.filter((a) => a.run_id === r.run_id), "forced_qty")),
+  }));
+  const charts = `<div class="section row cols-2">
+    ${chartCard("כמות סופית לפי חלוקה", vbars(runAgg))}
+    ${chartCard("כמות דחיפה בכוח לפי חלוקה", vbars(forceAgg))}
+  </div>`;
   return `<div class="card-sub" style="margin-bottom:16px">חלוקות (Haluka) — יצירת הזמנות לסניפים לאירועים ומצבי אזל. בחר חלוקה לצפייה בהקצאות לכל סניף-פריט כולל דחיפת כמות לפי גודל ויכולת מכר.</div>
-    ${tableHTML(cols, runs, { drill: (r) => `run:${r.run_id}` })}`;
+    ${tiles}${charts}<div class="section">${tableHTML(cols, runs, { drill: (r) => `run:${r.run_id}` })}</div>`;
 };
 
 PAGES.promotions = async () => {
@@ -371,9 +434,25 @@ PAGES.promotions = async () => {
     { key: "wave_strategy", label: "אספקה", render: (r) => `<span class="badge ${r.wave_strategy === "WAVES" ? "violet" : "gray"}">${r.wave_strategy === "WAVES" ? "גלים" : "חד-פעמי"}</span>` },
     { key: "status", label: "סטטוס", render: (r) => badge(r.status) },
   ];
+  const tiles = chipsRow([
+    ['סה"כ מבצעים', String(promos.length)],
+    ["פעילות אסים", String(aces.length)],
+    ["פעילות שוטפת", String(reg.length)],
+    ["פעילים (טרם הופצו)", String(promos.filter((p) => p.status !== "DISTRIBUTED").length)],
+  ]);
+  const fmtCount = {};
+  promos.forEach((p) => { fmtCount[p.format_code] = (fmtCount[p.format_code] || 0) + 1; });
+  const fmtAgg = Object.keys(fmtCount).map((f) => ({ label: formatName(f), value: fmtCount[f], color: "#8b5cf6" }));
+  const tradeAgg = promos.slice().sort((a, b) => Number(b.trade_agreement_qty || 0) - Number(a.trade_agreement_qty || 0))
+    .map((p) => ({ label: p.promo_id.replace("PROMO-", "#"), value: Number(p.trade_agreement_qty || 0), color: "#22d3ee" }));
+  const charts = `<div class="section row cols-2">
+    ${chartCard("מבצעים לפי פורמט", vbars(fmtAgg))}
+    ${chartCard("כמות הסכם מסחרי לפי מבצע", vbars(tradeAgg))}
+  </div>`;
   return `
     <div class="card-sub" style="margin-bottom:16px">פעילויות שוטפות (יוניברס) ופעילויות אסים (ACES). אסים נקבעות ברגע האחרון — מחיר וסוג מבצע מתעדכנים בהמשך; התכנון מתבסס על סולם חוזק חיזוי.</div>
-    <div class="card-head"><h3>פעילות אסים (ACES)</h3><span class="count-tag">${aces.length} מבצעים</span></div>
+    ${tiles}${charts}
+    <div class="section card-head"><h3>פעילות אסים (ACES)</h3><span class="count-tag">${aces.length} מבצעים</span></div>
     ${tableHTML(cols, aces, { drill: (r) => `promo:${r.promo_id}` })}
     <div class="section card-head"><h3>פעילות שוטפת (יוניברס)</h3><span class="count-tag">${reg.length} מבצעים</span></div>
     ${tableHTML(cols, reg, { drill: (r) => `promo:${r.promo_id}` })}`;
@@ -410,8 +489,17 @@ PAGES.cannibalization = async () => {
     { key: "status", label: "סטטוס", render: (r) => badge(r.status) },
     { key: "suggested_at", label: "התקבל", render: (r) => sdate(r.suggested_at) },
   ];
+  const pending = sugg.filter((s) => s.status === "PENDING").length;
+  const adjTotal = members.reduce((a, m) => a + Number(m.adjusted_forecast_qty || 0), 0);
+  const tiles = chipsRow([
+    ["עצי קניבליזציה", String(trees.length)],
+    ["מתוכננים (by design)", String(trees.filter((t) => t.tree_type === "USER_PARALLEL_BY_DESIGN").length)],
+    ["הצעות ממתינות", String(pending)],
+    ['סה"כ חיזוי מתואם', num(Math.round(adjTotal))],
+  ]);
   return `<div class="card-sub" style="margin-bottom:16px">עצי קניבליזציה — מתוכנן (פריטים מקבילים לשמירת נפח, למשל חלב מ-3 ספקים) או הצעת ספק החיזוי (חפיפת מגוון). מנהל שרשרת האספקה קובע את אחוז ההשפעה של כל פריט.</div>
-    <div class="row cols-2">${cards}</div>
+    ${tiles}
+    <div class="section row cols-2">${cards}</div>
     <div class="section card-head"><h3>הצעות מספק החיזוי</h3><span class="count-tag">${sugg.length}</span></div>
     ${tableHTML(scols, sugg, { drill: (r) => `sugg:${r.suggestion_id}` })}`;
 };
@@ -431,8 +519,25 @@ PAGES["purchase-orders"] = async () => {
     { key: "expected_delivery_date", label: "אספקה צפויה", render: (r) => sdate(r.expected_delivery_date) },
     { key: "status", label: "סטטוס", render: (r) => badge(r.status) },
   ];
+  const openCnt = headers.filter((h) => !["DELIVERED", "CANCELLED"].includes(h.status)).length;
+  const tiles = chipsRow([
+    ["הזמנות רכש", String(headers.length)],
+    ["פתוחות", String(openCnt)],
+    ["STO (סניף↔מחסן)", String(headers.filter((h) => h.po_type === "STO").length)],
+    ["רכש מחסן", String(headers.filter((h) => h.po_type === "WH_PURCHASE").length)],
+  ]);
+  const statuses = ["DRAFT", "SUBMITTED", "CONFIRMED", "IN_TRANSIT", "DELIVERED", "CANCELLED"];
+  const stColor = { DRAFT: "#6b7da3", SUBMITTED: "#f59e0b", CONFIRMED: "#38bdf8", IN_TRANSIT: "#6366f1", DELIVERED: "#22c55e", CANCELLED: "#ef4444" };
+  const stAgg = statuses.map((s) => ({ label: STATUS_HE[s] || s, value: headers.filter((h) => h.status === s).length, color: stColor[s] }))
+    .filter((x) => x.value > 0);
+  const typeColor = { STO: "#8b5cf6", DIRECT: "#22d3ee", WH_PURCHASE: "#6366f1" };
+  const typeAgg = ["STO", "DIRECT", "WH_PURCHASE"].map((t) => ({ label: t, value: headers.filter((h) => h.po_type === t).length, color: typeColor[t] })).filter((x) => x.value > 0);
+  const charts = `<div class="section row cols-2">
+    ${chartCard("הזמנות לפי סטטוס", vbars(stAgg))}
+    ${chartCard("הזמנות לפי סוג", vbars(typeAgg))}
+  </div>`;
   return `<div class="card-sub" style="margin-bottom:16px">הזמנות רכש — STO (סניף↔מחסן), DIRECT (סניף↔ספק), WH_PURCHASE (מחסן↔ספק). בחר הזמנה לצפייה בשורות.</div>
-    ${tableHTML(cols, headers, { drill: (r) => `po:${r.po_id}` })}`;
+    ${tiles}${charts}<div class="section">${tableHTML(cols, headers, { drill: (r) => `po:${r.po_id}` })}</div>`;
 };
 
 PAGES.master = async () => {
