@@ -920,20 +920,47 @@ Resources:
           AUTH_SECRET: !Ref AuthSecret
           TABLE_PREFIX: cp_
 
-  ApiFunctionUrl:
-    Type: AWS::Lambda::Url
+  # ============================================================
+  # API Gateway HTTP API in front of the Lambda (payload format 2.0).
+  # Used instead of a public Lambda Function URL, which can be blocked by
+  # org guardrails. The SPA calls this endpoint directly (Lambda handles CORS).
+  # ============================================================
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
     Properties:
-      TargetFunctionArn: !Ref ApiFunction
-      AuthType: NONE
-      InvokeMode: BUFFERED
+      Name: !Sub 'cp-poc-http-${AWS::StackName}'
+      ProtocolType: HTTP
 
-  ApiFunctionUrlPermission:
+  HttpApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt ApiFunction.Arn
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  HttpApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: $default
+      Target: !Sub 'integrations/${HttpApiIntegration}'
+
+  HttpApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: $default
+      AutoDeploy: true
+
+  ApiGwInvokePermission:
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref ApiFunction
-      Action: lambda:InvokeFunctionUrl
-      Principal: '*'
-      FunctionUrlAuthType: NONE
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*'
 
   # ============================================================
   # CloudFront distribution (serves the SPA; API is the Lambda Function URL)
@@ -972,6 +999,6 @@ Outputs:
   DistributionId:
     Description: CloudFront distribution id (for cache invalidation)
     Value: !Ref CloudFrontDistribution
-  ApiFunctionUrl:
-    Description: Lambda Function URL (the API; the SPA calls this directly via CORS)
-    Value: !GetAtt ApiFunctionUrl.FunctionUrl
+  ApiEndpoint:
+    Description: HTTP API base URL (the API; the SPA calls this directly via CORS)
+    Value: !GetAtt HttpApi.ApiEndpoint

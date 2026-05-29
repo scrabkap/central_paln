@@ -113,7 +113,7 @@ jobs:
           echo "web_bucket=$(get WebBucketName)" >> "$GITHUB_OUTPUT"
           echo "dist_id=$(get DistributionId)" >> "$GITHUB_OUTPUT"
           echo "url=$(get CloudFrontURL)" >> "$GITHUB_OUTPUT"
-          echo "api_url=$(get ApiFunctionUrl)" >> "$GITHUB_OUTPUT"
+          echo "api_url=$(get ApiEndpoint)" >> "$GITHUB_OUTPUT"
 
       - name: Inject API URL into the SPA
         run: |
