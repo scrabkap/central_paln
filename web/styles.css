@@ -125,7 +125,7 @@ button { font-family: inherit; cursor: pointer; }
 .shell { display: grid; grid-template-columns: 256px 1fr; min-height: 100vh; }
 .sidebar {
   background: linear-gradient(180deg, var(--surface), var(--bg-2));
-  border-right: 1px solid var(--border-soft); padding: 20px 14px; position: sticky; top: 0;
+  border-inline-end: 1px solid var(--border-soft); padding: 20px 14px; position: sticky; top: 0;
   height: 100vh; display: flex; flex-direction: column; gap: 6px;
 }
 .sidebar .brand { padding: 6px 8px 18px; }
@@ -470,12 +470,31 @@ table.data.promo-tree tbody td:nth-child(2) { border-inline-start: 1px solid var
 table.data.promo-tree tbody tr.leaf td { background: rgba(255, 255, 255, .022); }
 table.data.promo-tree tbody tr.leaf:hover td { background: rgba(99, 102, 241, .12); }
 table.data.promo-tree tbody tr.agg td:first-child { color: var(--text); }
-.tree-chev { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px;
-  border-radius: 5px; color: var(--text); font-size: 11px; background: var(--surface-3);
-  border: 1px solid var(--border-strong); margin-inline-end: 6px; }
-tr.leaf .tree-chev { background: transparent; border-color: transparent; }
+.tree-chev { color: var(--text-mut); vertical-align: middle; margin-inline-end: 7px; transition: transform .12s, color .12s; }
+tr.agg:hover .tree-chev { color: var(--text); }
+.tree-chev-sp { display: inline-block; width: 13px; margin-inline-end: 7px; }
 .tree-name { cursor: pointer; }
-.tree-name:hover { color: var(--action); }
+.tree-name:hover > [dir="auto"] { color: var(--action); }
+.lvl-tag { display: inline-block; font-size: 10px; font-weight: 600; color: var(--text-mut);
+  background: var(--surface-3); border: 1px solid var(--border); border-radius: 5px;
+  padding: 1px 7px; margin-inline-end: 8px; vertical-align: middle; }
+.tree-code { font-size: 11px; color: var(--text-mut); font-variant-numeric: tabular-nums; }
+/* status chip counts */
+.chip-cnt { display: inline-block; min-width: 18px; padding: 0 5px; margin-inline-start: 4px;
+  font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; border-radius: 999px;
+  background: rgba(255, 255, 255, .07); color: var(--text-dim); }
+.chip-group button.active .chip-cnt { background: rgba(0, 0, 0, .25); color: inherit; }
+/* tree header label + technical toggle */
+.th-tree { display: inline-flex; align-items: center; gap: 8px; }
+.tech-toggle { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 22px;
+  border-radius: 6px; background: var(--surface-2); border: 1px solid var(--border-strong); color: var(--text-mut);
+  cursor: pointer; padding: 0; }
+.tech-toggle:hover { color: var(--text); }
+.tech-toggle.on { background: var(--action-soft); border-color: var(--action); color: var(--action); }
+/* date-range filter labels */
+.date-filt { display: inline-flex; flex-direction: column; gap: 5px; }
+.date-filt > span { font-size: 11px; color: var(--text-mut); }
+.date-filt input.select { min-width: 170px; }
 
 /* duo (two decision cards) + inline trade-agreement editor */
 .duo { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }

@@ -422,6 +422,8 @@ PAGES["central-planner"] = async () => {
 
 /* ---------------- promotions (פעילות שוטפת) ---------------- */
 const PROMO_NOW = new Date(2026, 4, 29); // 2026-05-29
+const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const promoNowPlus = (days) => { const d = new Date(PROMO_NOW); d.setDate(d.getDate() + days); return ymd(d); };
 function promoPhase(p) {
   const s = new Date(p.start_date), e = new Date(p.end_date);
   if (e < PROMO_NOW) return "COMPLETED";
@@ -536,7 +538,7 @@ PAGES.promotions = async () => {
   const d = await load("/api/promotions");
   if (!d) return `<div class="empty">אין נתונים</div>`;
   state._promo = d;
-  state._promoF = state._promoF || { status: "all", format: "", display: "", vendor: "", category: "", item: "", ptype: "", wh: "", startFrom: "", endTo: "" };
+  state._promoF = state._promoF || { status: "all", format: "", display: "", vendor: "", category: "", item: "", ptype: "", wh: "", startFrom: promoNowPlus(-14), startTo: promoNowPlus(14) };
   state._promoX = new Set();
   state._promoOpts = {};
   state._decisions = loadDecisions();
@@ -550,6 +552,8 @@ PAGES.promotions.after = () => {
     if (el) { state._promoF[el.dataset.pf] = el.dataset.pf === "format" || el.dataset.pf === "vendor" || el.dataset.pf === "display" || el.dataset.pf === "category" || el.dataset.pf === "item" || el.dataset.pf === "ptype" || el.dataset.pf === "wh" ? resolvePf(el.dataset.pf, el.value) : el.value; renderPromo(); }
   });
   root.addEventListener("click", (e) => {
+    const tt = e.target.closest("[data-techtoggle]");
+    if (tt) { state._promoTech = !state._promoTech; renderPromo(); return; }
     const sf = e.target.closest("[data-status]");
     if (sf) { state._promoF.status = sf.dataset.status; renderPromo(); return; }
     const kf = e.target.closest("[data-kpifilter]");
@@ -570,10 +574,11 @@ function statusFilterOk(p) {
   if (f === "completed") return ph === "COMPLETED";
   return true;
 }
+// filters on the campaign START date being inside the [startFrom, startTo] window
 function dateFilterOk(p) {
   const F = state._promoF;
   if (F.startFrom && p.start_date < F.startFrom) return false;
-  if (F.endTo && p.end_date > F.endTo) return false;
+  if (F.startTo && p.start_date > F.startTo) return false;
   return true;
 }
 
@@ -612,15 +617,15 @@ function groupMap(arr, keyFn) {
 function buildPromoTree(allocs, pmap) {
   const out = [];
   for (const [fcode, fa] of groupMap(allocs, (a) => a.format_code)) {
-    const fnode = { id: "F#" + fcode, depth: 0, kind: "format", fmt: fcode, open: "fmt:" + fcode, label: formatName(fcode), allocs: fa, pmap, children: [] };
+    const fnode = { id: "F#" + fcode, depth: 0, kind: "format", fmt: fcode, code: fcode, open: "fmt:" + fcode, label: formatName(fcode), allocs: fa, pmap, children: [] };
     for (const [vcode, va] of groupMap(fa, (a) => a.vendor_id)) {
-      const vnode = { id: fnode.id + "|V#" + vcode, depth: 1, kind: "vendor", open: "ven:" + fcode + "|" + vcode, label: LK.vendors[vcode] || vcode, allocs: va, pmap, children: [] };
+      const vnode = { id: fnode.id + "|V#" + vcode, depth: 1, kind: "vendor", code: vcode, open: "ven:" + fcode + "|" + vcode, label: LK.vendors[vcode] || vcode, allocs: va, pmap, children: [] };
       for (const [dcode, da] of groupMap(va, (a) => a.display_type_code)) {
-        const dnode = { id: vnode.id + "|D#" + dcode, depth: 2, kind: "display", open: "disp:" + fcode + "|" + vcode + "|" + dcode, label: displayName(dcode), allocs: da, pmap, children: [] };
+        const dnode = { id: vnode.id + "|D#" + dcode, depth: 2, kind: "display", code: dcode, open: "disp:" + fcode + "|" + vcode + "|" + dcode, label: displayName(dcode), allocs: da, pmap, children: [] };
         for (const [ccode, ca] of groupMap(da, (a) => a.category_code)) {
-          const cnode = { id: dnode.id + "|C#" + ccode, depth: 3, kind: "category", open: "cat:" + fcode + "|" + vcode + "|" + dcode + "|" + ccode, label: (ca[0] && ca[0].category_name) || ccode, allocs: ca, pmap, children: [] };
+          const cnode = { id: dnode.id + "|C#" + ccode, depth: 3, kind: "category", code: ccode, open: "cat:" + fcode + "|" + vcode + "|" + dcode + "|" + ccode, label: (ca[0] && ca[0].category_name) || ccode, allocs: ca, pmap, children: [] };
           for (const [pid, pa] of groupMap(ca, (a) => a.promo_id)) {
-            cnode.children.push({ id: "P#" + pid + "@" + cnode.id, depth: 4, kind: "promo", open: "promo:" + pid, promo: pmap[pid], label: pmap[pid] ? pmap[pid].description : pid, allocs: pa, pmap });
+            cnode.children.push({ id: "P#" + pid + "@" + cnode.id, depth: 4, kind: "promo", code: pid, open: "promo:" + pid, promo: pmap[pid], label: pmap[pid] ? pmap[pid].description : pid, allocs: pa, pmap });
           }
           dnode.children.push(cnode);
         }
@@ -661,13 +666,17 @@ function nodeTrade(node) {
   if (node.kind === "promo") return effectiveTrade(node.promo);
   return [...new Set(node.allocs.map((a) => a.promo_id))].reduce((s, pid) => s + (node.pmap[pid] ? effectiveTrade(node.pmap[pid]) : 0), 0);
 }
+const LEVEL_HE = { format: "פורמט", vendor: "ספק", display: "אמצעי תצוגה", category: "היררכיית פריט", promo: "מבצע" };
+const chevronSVG = (open) => `<svg class="tree-chev" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="transform:rotate(${open ? 90 : 0}deg)"><path d="M9 6l6 6-6 6"/></svg>`;
 function renderPromoNode(node) {
   const m = aggNode(node);
   const isPromo = node.kind === "promo";
   const exp = !isPromo && state._promoX.has(node.id);
   const provider = m.orig, trade = nodeTrade(node);
-  const chevron = `<span class="tree-chev">${isPromo ? "" : (exp ? "▾" : "▸")}</span>`;
-  const name = `<span class="tree-name" data-open="${esc(node.open)}"><span dir="auto" class="${isPromo ? "" : "strong"}">${esc(node.label)}</span></span>${isPromo ? " " + lifecyclePill(node.promo) : ""}`;
+  const chevron = isPromo ? `<span class="tree-chev-sp"></span>` : chevronSVG(exp);
+  const tag = `<span class="lvl-tag">${LEVEL_HE[node.kind] || ""}</span>`;
+  const code = state._promoTech && node.code ? ` <span class="tree-code" dir="ltr">${esc(node.code)}</span>` : "";
+  const name = `<span class="tree-name" data-open="${esc(node.open)}">${tag}<span dir="auto" class="${isPromo ? "" : "strong"}">${esc(node.label)}</span>${code}</span>${isPromo ? " " + lifecyclePill(node.promo) : ""}`;
   const rowCls = isPromo ? "leaf clickable" : "agg clickable";
   const rowAttr = isPromo ? `class="${rowCls}"` : `data-toggle="${esc(node.id)}" class="${rowCls}"`;
   const pN = roleNum(provider, isPromo ? "provider" : "muted");
@@ -774,10 +783,7 @@ function renderPromo() {
     return `<input class="search" style="min-width:180px" list="dl-${key}" data-pf="${key}" placeholder="${esc(ph)}" value="${esc(curOpt ? curOpt.text : "")}" autocomplete="off" />
       <datalist id="dl-${key}">${opts.map((o) => `<option value="${esc(o.text)}"></option>`).join("")}</datalist>`;
   };
-  const statusChips = `<div class="chip-group">${STATUS_CHIPS.map(([k, lbl]) =>
-    `<button class="${F.status === k ? "active" + (k === "awaiting" ? " awaiting" : "") : ""}" data-status="${k}">${lbl}</button>`).join("")}</div>`;
-
-  // ---- KPIs: dim + date filtered, across all phases (independent of the status chip) ----
+  // ---- KPIs + filter counts: dim + date filtered, across all phases ----
   const dimScoped = (d.promotions || []).filter((p) => p.activity_type === "REGULAR_UNIVERSE")
     .map((p) => ({ ...p, _phase: promoPhase(p), _days: promoDays(p.start_date), _disc: promoDisc(p) }))
     .filter((p) => {
@@ -796,11 +802,16 @@ function renderPromo() {
     });
   const awaiting = dimScoped.filter((p) => promoDecisionStatus(p) === "awaiting");
   const locked = dimScoped.filter((p) => promoDecisionStatus(p) === "locked");
+  const live = dimScoped.filter((p) => p._phase === "ONGOING");
+  const done = dimScoped.filter((p) => p._phase === "COMPLETED");
+  const soon7 = dimScoped.filter((p) => p._phase === "UPCOMING" && p._days <= 7);
   const gapsActive = dimScoped.filter((p) => p._phase !== "COMPLETED" && Number(p.original_forecast_total || 0) > 0)
     .map((p) => (effectiveTrade(p) - Number(p.original_forecast_total)) / Number(p.original_forecast_total) * 100);
   const avgGap = gapsActive.length ? Math.round(gapsActive.reduce((a, x) => a + x, 0) / gapsActive.length) : null;
-  const soon7 = dimScoped.filter((p) => p._phase === "UPCOMING" && p._days <= 7);
-  const live = dimScoped.filter((p) => p._phase === "ONGOING");
+
+  const cnt = { all: dimScoped.length, awaiting: awaiting.length, locked: locked.length, ongoing: live.length, completed: done.length };
+  const statusChips = `<div class="chip-group">${STATUS_CHIPS.map(([k, lbl]) =>
+    `<button class="${F.status === k ? "active" + (k === "awaiting" ? " awaiting" : "") : ""}" data-status="${k}">${lbl} <span class="chip-cnt">${cnt[k]}</span></button>`).join("")}</div>`;
 
   const dtile = (val, lbl, accent, filterKind) =>
     `<div class="kpi-d ${filterKind ? "clickable" : ""}" ${filterKind ? `data-kpifilter="${filterKind}"` : ""}>
@@ -815,24 +826,17 @@ function renderPromo() {
     ${dtile(String(live.length), "פעילים כעת", "var(--state-info)", "ongoing")}
   </div>`;
 
-  // ---- alert band: concrete review call (big gap vs original, not yet locked) ----
-  const gap10 = awaiting.filter((p) => { const gi = gapInfo(effectiveTrade(p), Number(p.original_forecast_total || 0)); return gi && Math.abs(gi.frac) >= 0.10; });
-  const gap10soon = gap10.filter((p) => p._phase === "UPCOMING" && p._days <= 7);
-  const alertBand = gap10.length ? `<div class="alert-band">
-    <p><b class="num">${gap10.length}</b> מבצעים עם פער 10%+ בין ההסכם המסחרי לחיזוי המקורי, טרם ננעלו. <a class="linkish" data-status="awaiting">לסקירה ונעילה.</a>${gap10soon.length ? ` <b class="num">${gap10soon.length}</b> מתחילים תוך 7 ימים.` : ""}</p>
-  </div>` : "";
-
   const tree = buildPromoTree(allocs, pmap);
   sortPromoTree(tree);
   const treeRows = tree.map(renderPromoNode).join("");
-  const header = `<tr><th>פורמט → ספק → תצוגה → היררכיה → מבצע</th><th class="num">חיזוי מקורי</th><th class="num">הסכם מסחרי</th><th class="num">פער מול מקורי</th><th>החלטה</th><th>מתחיל</th></tr>`;
-  const dInput = (key, ph) => `<input type="date" class="select" style="min-width:150px" data-pf="${key}" value="${esc(F[key] || "")}" title="${esc(ph)}" placeholder="${esc(ph)}" />`;
+  const techOn = !!state._promoTech;
+  const codeIcon = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6l-5 6 5 6M16 6l5 6-5 6"/></svg>`;
+  const header = `<tr><th><span class="th-tree">היררכיית מבצע<button class="tech-toggle ${techOn ? "on" : ""}" data-techtoggle title="הצג/הסתר קודים טכניים">${codeIcon}</button></span></th><th class="num">חיזוי מקורי</th><th class="num">הסכם מסחרי</th><th class="num">פער מול מקורי</th><th>החלטה</th><th>מתחיל</th></tr>`;
+  const dInput = (key, lbl) => `<label class="date-filt"><span>${esc(lbl)}</span><input type="date" class="select" data-pf="${key}" value="${esc(F[key] || "")}" /></label>`;
 
   root.innerHTML = `
-    <div class="card-sub" style="margin-bottom:12px">קביעת החיזוי המאושר (הסכם מסחרי) לכל מבצע מול החיזוי המקורי. צבע מזהה מקור: <span class="role-num provider">מקורי</span> · <span class="role-num agreement">הסכם מסחרי</span>.</div>
-    ${alertBand}
     ${kpis}
-    <div class="filters section">${statusChips}</div>
+    <div class="filters section" style="flex-wrap:wrap">${statusChips}</div>
     <div class="filters">
       ${combo("format", "פורמט")}
       ${combo("vendor", "ספק")}
@@ -841,8 +845,10 @@ function renderPromo() {
       ${combo("item", "פריט")}
       ${combo("ptype", "סוג מבצע")}
       ${combo("wh", "מחסן")}
-      ${dInput("startFrom", "מתאריך התחלה")}
-      ${dInput("endTo", "עד תאריך סיום")}
+    </div>
+    <div class="filters" style="align-items:flex-end">
+      ${dInput("startFrom", "תחילת מבצע — מתאריך")}
+      ${dInput("startTo", "תחילת מבצע — עד תאריך")}
     </div>
     <div class="section table-wrap"><table class="data promo-tree"><thead>${header}</thead><tbody>${treeRows || `<tr><td colspan="6"><div class="empty">אין מבצעים בהיקף הנבחר</div></td></tr>`}</tbody></table></div>`;
 }
