@@ -156,18 +156,25 @@ function vbars(items, color = "#8b5cf6", height = 180) {
 /* ---------------- components ---------------- */
 function kpiCard(k) {
   const trend = (k.trend || []).map((t) => Number(t.value));
-  const color = k.code === "shrink" ? "#f59e0b" : "#6366f1";
-  const good = k.direction === "down" ? k.delta < 0 : k.delta >= 0;
-  const arrow = (k.direction === "down" ? k.delta < 0 : k.delta > 0) ? "▲" : "▼";
+  const color = k.code === "shrink" || k.code === "store_overrides" ? "#f59e0b" : "#6366f1";
+  // Defensive cap: any percentage KPI should never read above 100, even if
+  // upstream data is dirty. Direction handles "lower is better" KPIs (shrink,
+  // store_overrides): for them, a negative delta is an improvement.
+  const unit = k.unit || "";
+  const raw = Number(k.value);
+  const value = unit === "%" && Number.isFinite(raw) ? Math.min(100, Math.max(0, raw)) : raw;
+  const lowerBetter = k.direction === "down";
+  const good = lowerBetter ? k.delta <= 0 : k.delta >= 0;
+  const arrow = k.delta === 0 ? "·" : k.delta > 0 ? "▲" : "▼";
   return `<div class="kpi" data-drill="kpi:${esc(k.code)}">
     <div class="k-top">
       <div class="k-label">${esc(k.label_he || k.label_en || k.code)}</div>
-      ${ring(Number(k.value), Number(k.target), color)}
+      ${ring(value, Number(k.target), color)}
     </div>
-    <div class="k-val">${num(k.value)}<small>${esc(k.unit || "")}</small></div>
+    <div class="k-val">${num(value)}<small>${esc(unit)}</small></div>
     <div class="k-meta">
       <span class="${good ? "trend-up" : "trend-down"}">${arrow} ${num(Math.abs(k.delta))}</span>
-      <span class="k-target">יעד ${num(k.target)}${esc(k.unit || "")}</span>
+      <span class="k-target">יעד ${num(k.target)}${esc(unit)}</span>
     </div>
     <div class="k-spark">${sparkline(trend, color)}</div>
   </div>`;
@@ -239,14 +246,8 @@ PAGES.overview = async () => {
     ["חסימות אזל מהמלאי", c.oos_blocks], ["פריטי מחסן (MRP)", c.wh_items],
     ["פריטי סניף (MRP)", c.store_items],
   ].map((x) => `<div class="chip"><div class="c-val">${num(x[1])}</div><div class="c-lbl">${x[0]}</div></div>`).join("");
-  const trend = d.mrp_trend || [];
-  const lc = lineChart({
-    labels: trend.map((t) => t.date),
-    datasets: [
-      { name: "מחסן", color: "#8b5cf6", data: trend.map((t) => Math.round(t.wh_qty)) },
-      { name: "סניף", color: "#22d3ee", data: trend.map((t) => Math.round(t.store_qty)) },
-    ],
-  });
+  const svf = (d.sales_vs_forecast || []).slice(0, 8);
+  const svfChart = svf.length ? salesVsForecastChart(svf) : `<div class="empty">אין מבצעים שהושלמו עדיין.</div>`;
   const sb = (d.promo_status_breakdown || []).map((s) => ({
     label: STATUS_HE[s.status] || s.status, value: s.count,
     color: { DISTRIBUTED: "#22c55e", WAITING_DISTRIBUTION: "#38bdf8", WAITING_QC: "#f59e0b", QUEUED_TONIGHT: "#8b5cf6" }[s.status] || "#6366f1",
@@ -256,9 +257,9 @@ PAGES.overview = async () => {
     <div class="section chips">${chips}</div>
     <div class="section row cols-2">
       <div class="card">
-        <div class="card-head"><h3>המלצות MRP — 14 ימים אחרונים</h3></div>
-        ${lc}
-        <div class="legend"><span><i style="background:#8b5cf6"></i> מחסן (יח' בסיס)</span><span><i style="background:#22d3ee"></i> סניף (יח' בסיס)</span></div>
+        <div class="card-head"><h3>מכר מול חיזוי לפי קטגוריה</h3><span class="card-sub" style="margin:0">מבצעים שהסתיימו</span></div>
+        ${svfChart}
+        <div class="legend" style="margin-top:8px"><span><i style="background:var(--role-approved)"></i> חיזוי</span><span><i style="background:var(--role-actual)"></i> נמכר בפועל</span></div>
       </div>
       <div class="card">
         <div class="card-head"><h3>סטטוס מבצעים</h3></div>
@@ -266,6 +267,29 @@ PAGES.overview = async () => {
       </div>
     </div>`;
 };
+/* Sales vs forecast by category — paired horizontal bars + accuracy label.
+   Categories are sorted by forecast size (largest on top). */
+function salesVsForecastChart(rows) {
+  const W = 520, rowH = 38, padTop = 8, padBot = 8, labelW = 130, valW = 70;
+  const H = padTop + padBot + rows.length * rowH;
+  const max = Math.max(1, ...rows.flatMap((r) => [Number(r.forecast) || 0, Number(r.sold) || 0]));
+  const barX = labelW, barW = W - labelW - valW;
+  const scale = (v) => Math.max(0, (Number(v) || 0) / max) * barW;
+  let svg = `<svg class="chart svf-chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">`;
+  rows.forEach((r, i) => {
+    const y = padTop + i * rowH;
+    const fcW = scale(r.forecast), sdW = scale(r.sold);
+    const acc = Number(r.forecast) > 0 ? Math.round(100 - Math.abs(Number(r.sold) - Number(r.forecast)) / Number(r.forecast) * 100) : null;
+    const accClamped = acc == null ? null : Math.max(0, acc);
+    const color = accClamped == null ? "var(--text-mut)" : accClamped >= 90 ? "var(--state-good)" : accClamped >= 75 ? "var(--state-warn)" : "var(--state-bad)";
+    svg += `<text x="${W - 4}" y="${y + 14}" class="svf-cat" text-anchor="end">${esc(r.category)}</text>`;
+    svg += `<text x="${W - 4}" y="${y + 28}" class="svf-meta" text-anchor="end">${r.promos} מבצעים</text>`;
+    svg += `<rect x="${W - labelW - fcW}" y="${y + 6}" width="${fcW}" height="11" rx="2.5" fill="var(--role-approved)" fill-opacity=".55"/>`;
+    svg += `<rect x="${W - labelW - sdW}" y="${y + 20}" width="${sdW}" height="11" rx="2.5" fill="var(--role-actual)" fill-opacity=".85"/>`;
+    svg += `<text x="4" y="${y + 22}" class="svf-acc" fill="${color}">${accClamped == null ? "—" : accClamped + "%"}</text>`;
+  });
+  return svg + `</svg>`;
+}
 
 PAGES["wh-mrp"] = async () => {
   const rows = await load("/api/wh-mrp") || [];
@@ -1577,11 +1601,16 @@ function midCampaignBlock(p, m) {
   for (let day = 0; day <= dur; day++) { labels.push(addDaysIso(p.start_date, day)); fc.push(Math.round(m.value * day / dur));
     ac.push(day <= elapsed ? Math.round(m.sold * day / Math.max(1, elapsed)) : null); }
   const soldPct = m.value > 0 ? Math.round(m.sold / m.value * 100) : 0;
+  // Forecast quality = how close actual sales are to the expected sales for
+  // the SAME elapsed window. Comparing total-period sold to total-period
+  // forecast mid-campaign is wrong — pro-rate the forecast to the days lived.
+  const expected = m.value > 0 && dur > 0 ? Math.round(m.value * elapsed / dur) : 0;
+  const fq = m.phase === "COMPLETED" ? fqAcc(m.sold, m.value) : fqAcc(m.sold, expected);
   const perfChip = (v, l, u) => `<div class="chip"><div class="c-val">${v == null ? "—" : num(v) + (u || "")}</div><div class="c-lbl">${l}</div></div>`;
   return `<div class="card-sub" style="margin:2px 0 10px">יום ${elapsed} מתוך ${dur} · ${soldPct}% מהחיזוי נמכר</div>
     ${cumChart(labels, fc, ac, elapsed)}
     <div class="chips" style="margin-top:14px">
-      ${perfChip(fqAcc(m.sold, m.value), "איכות חיזוי", "%")}
+      ${perfChip(fq, "איכות חיזוי", "%")}
       ${perfChip(cap100(Number(p.otif_pct)), "OTIF", "%")}
       ${perfChip(cap100(Number(p.availability_pct)), "זמינות", "%")}
       ${perfChip(Number(p.shrink_pct), "פחת", "%")}</div>`;

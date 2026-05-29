@@ -553,6 +553,12 @@ tr.agg:hover .tree-chev { color: var(--text); }
 .dec-pill.locked { color: var(--role-approved); background: var(--role-approved-soft); border-color: rgba(94, 186, 140, .35); }
 .dec-pill.closed { color: var(--text-mut); background: var(--surface-3); border-color: var(--border); }
 
+/* sales vs forecast by category (overview) */
+.svf-chart { width: 100%; height: auto; display: block; }
+.svf-cat { fill: var(--text); font-size: 12px; font-weight: 600; }
+.svf-meta { fill: var(--text-mut); font-size: 10.5px; }
+.svf-acc { font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
+
 /* ---- cannibalization workspace ---- */
 .can-split { display: flex; height: 9px; border-radius: 999px; overflow: hidden; background: var(--bg-2); }
 .can-split > span { display: block; height: 100%; }
@@ -605,19 +611,28 @@ table.data tfoot td { border-top: 2px solid var(--border-strong); padding: 12px 
 .can-lock:hover { border-color: var(--border-strong); }
 .can-lock.on { background: rgba(229, 85, 106, .12); color: var(--bad); border-color: rgba(229, 85, 106, .4); }
 
-/* sidebar collapse */
+/* sidebar collapse — width animates, text fades+clips so labels don't wrap
+   awkwardly mid-transition. `width: 0` on the inline text would still
+   reserve flex space, so the collapsed rules center children instead. */
+.shell { transition: grid-template-columns .18s ease; }
 .sidebar-toggle { margin-inline-start: auto; background: var(--surface-2); border: 1px solid var(--border); color: var(--text-mut);
-  width: 28px; height: 28px; border-radius: 8px; cursor: pointer; font-size: 14px; line-height: 1; flex: none; transition: .12s; }
+  width: 28px; height: 28px; border-radius: 8px; cursor: pointer; font-size: 14px; line-height: 1; flex: none; transition: transform .18s ease, color .12s, border-color .12s; }
 .sidebar-toggle:hover { color: var(--text); border-color: var(--border-strong); }
-.shell.nav-collapsed { grid-template-columns: 64px 1fr; }
-.shell.nav-collapsed .brand-text, .shell.nav-collapsed .nav-section,
-.shell.nav-collapsed .nav-item span, .shell.nav-collapsed .user-box .nm,
-.shell.nav-collapsed .user-box .rl { display: none; }
-.shell.nav-collapsed .sidebar { padding: 20px 8px; }
-.shell.nav-collapsed .nav-item { justify-content: center; padding: 10px 0; }
-.shell.nav-collapsed .brand { justify-content: center; }
-.shell.nav-collapsed .sidebar-toggle { transform: rotate(180deg); margin: 0; }
-.shell.nav-collapsed .user-box { justify-content: center; }
+.brand-text { min-width: 0; flex: 1; overflow: hidden; transition: opacity .14s ease, max-width .18s ease; max-width: 200px; opacity: 1; }
+.nav-item span { min-width: 0; overflow: hidden; white-space: nowrap; transition: opacity .14s ease, max-width .18s ease; max-width: 160px; opacity: 1; }
+.nav-section, .user-box .nm, .user-box .rl { transition: opacity .14s ease, max-height .18s ease; max-height: 40px; overflow: hidden; opacity: 1; }
+.shell.nav-collapsed { grid-template-columns: 68px 1fr; }
+.shell.nav-collapsed .sidebar { padding: 20px 10px; }
+.shell.nav-collapsed .brand { justify-content: center; gap: 0; }
+.shell.nav-collapsed .brand-text { max-width: 0; opacity: 0; }
+.shell.nav-collapsed .nav-item { justify-content: center; padding: 10px 0; gap: 0; }
+.shell.nav-collapsed .nav-item span { max-width: 0; opacity: 0; }
+.shell.nav-collapsed .nav-section { max-height: 0; opacity: 0; padding: 0; margin: 6px 0; }
+.shell.nav-collapsed .sidebar-toggle { transform: rotate(180deg); }
+.shell.nav-collapsed .user-box { justify-content: center; gap: 0; }
+.shell.nav-collapsed .user-box .nm,
+.shell.nav-collapsed .user-box .rl { max-height: 0; opacity: 0; }
+.shell.nav-collapsed .user-box > div:not(.avatar) { max-width: 0; overflow: hidden; }
 
 @media (max-width: 1100px) { .can-top-grid { grid-template-columns: 1fr; } }
 @media (max-width: 980px) {

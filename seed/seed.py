@@ -1037,25 +1037,33 @@ def build_oos_and_trade():
 # KPI snapshots (14 days, 6 KPIs)
 # --------------------------------------------------------------------------
 def build_kpis():
+    # availability is capped at 100, shrink and store_overrides are
+    # "lower is better" (direction=down) — the planner wants stores to
+    # adopt MRP recommendations, so a high override rate is bad.
     defs = [
-        ("forecast_accuracy", "% דיוק חיזוי", "Forecast accuracy", 82, 85, "up"),
-        ("store_touch", "% נגיעות המלצות סניפים", "Store recommendation touch", 64, 75, "up"),
-        ("wh_adoption", "% אימוץ המלצות מחסנים", "WH recommendation adoption", 73, 80, "up"),
-        ("availability", "% זמינות", "Availability", 96, 98, "up"),
-        ("otif", "% OTIF", "On-time in-full", 89, 92, "up"),
-        ("shrink", "% פחת", "Shrink", 2.4, 2.0, "down"),
+        ("forecast_accuracy", "% דיוק חיזוי", "Forecast accuracy",
+         82, 85, "up", 100),
+        ("store_overrides", "% התערבויות סניפים במלצות",
+         "Store overrides of MRP recommendations", 36, 25, "down", 100),
+        ("wh_adoption", "% אימוץ המלצות מחסנים",
+         "WH recommendation adoption", 73, 80, "up", 100),
+        ("availability", "% זמינות", "Availability", 96, 98, "up", 100),
+        ("otif", "% OTIF", "On-time in-full", 89, 92, "up", 100),
+        ("shrink", "% פחת", "Shrink", 2.4, 2.0, "down", None),
     ]
-    for code, he, en, base, target, direction in defs:
+    for code, he, en, base, target, direction, ceiling in defs:
         for back in range(DAYS - 1, -1, -1):
             date = TODAY - dt.timedelta(days=back)
             drift = (DAYS - back) * (0.25 if direction == "up" else -0.05)
             noise = random.uniform(-1.2, 1.2)
             value = round(base + drift + noise, 1)
-            unit = "%"
+            if ceiling is not None:
+                value = min(ceiling, value)
+                value = max(0, value)
             put("kpi", {
                 "PK": f"KPI#{code}", "SK": f"DATE#{iso(date)}",
                 "kpi_code": code, "label_he": he, "label_en": en,
-                "date": iso(date), "value": d(value), "unit": unit,
+                "date": iso(date), "value": d(value), "unit": "%",
                 "target": d(target), "direction": direction,
                 "record_type": "kpi",
             })

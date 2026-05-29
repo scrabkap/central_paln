@@ -166,7 +166,7 @@ def ep_overview():
                 "trend": trend,
             }
         )
-    order = ["forecast_accuracy", "store_touch", "wh_adoption",
+    order = ["forecast_accuracy", "store_overrides", "wh_adoption",
              "availability", "otif", "shrink"]
     kpis.sort(key=lambda k: order.index(k["code"]) if k["code"] in order else 99)
 
@@ -183,6 +183,24 @@ def ep_overview():
 
     wh_mrp = _rows("wh_mrp")
     store_mrp = _rows("store_mrp")
+    # Sales vs forecast, grouped by article hierarchy (category).
+    # Only completed promos have real sold_total; ongoing+upcoming would skew
+    # the comparison.
+    cat_agg = {}
+    for p in promo_meta:
+        if p.get("phase") != "COMPLETED":
+            continue
+        cat = p.get("category_name") or p.get("category_code") or "—"
+        bucket = cat_agg.setdefault(cat, {"category": cat, "forecast": 0.0,
+                                           "sold": 0.0, "promos": 0})
+        bucket["forecast"] += float(p.get("original_forecast_total") or 0)
+        bucket["sold"] += float(p.get("sold_total") or 0)
+        bucket["promos"] += 1
+    sales_vs_forecast = sorted(
+        (b for b in cat_agg.values() if b["forecast"] > 0),
+        key=lambda b: b["forecast"],
+        reverse=True,
+    )[:10]
     mrp_trend = {}
     for r in wh_mrp:
         d = r.get("snapshot_date")
@@ -213,6 +231,7 @@ def ep_overview():
         "promo_status_breakdown": [
             {"status": k, "count": v} for k, v in status_breakdown.items()
         ],
+        "sales_vs_forecast": sales_vs_forecast,
         "mrp_trend": mrp_series,
     }
 
