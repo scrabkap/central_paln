@@ -438,10 +438,6 @@ const cap100 = (v) => v == null ? null : Math.min(100, Math.round(v));
 const fqAcc = (sold, appr) => (sold > 0 && appr > 0) ? Math.max(0, Math.round(100 - Math.abs(sold - appr) / appr * 100)) : null;
 const fqTone = (q) => q == null ? "gray" : q >= 90 ? "green" : q >= 75 ? "amber" : "red";
 const adoptTone = (q) => q == null ? "gray" : q >= 90 ? "green" : q >= 70 ? "amber" : "red";
-const PROMO_BUCKETS = [
-  ["next2w", "2 שבועות הקרובים"], ["ongoing", "פעילים"],
-  ["completed", "הסתיימו"], ["all", "הכל"],
-];
 const PTYPE_HE = { Y001: "מחיר קבוע", Y003: "אחוז הנחה", Y004: "הנחה כספית", Y007: "מתנה", Y009: "נקודות מועדון", Y010: "מדיה", Y011: "כפולה" };
 const LOYALTY_HE = { "000": "כל הלקוחות", "001": "חברי מועדון", "002": "זהב", "003": "פלטינום" };
 const ptypeName = (c) => c ? (PTYPE_HE[c] || c) : "—";
@@ -458,15 +454,12 @@ function resolvePf(key, text) {
   return o ? o.value : "";
 }
 
-/* ----- decision state (the one thing this module exists for) ----- */
-const DEC_HE = {
-  awaiting: "דורש החלטה", accepted: "אושר", matched: "הותאם להסכם",
-  change_requested: "בקשת שינוי", aligned: "תואם הסכם",
-};
-const MATCH_REASONS = [
-  "התאמה להתחייבות הספק", "צמצום סיכון עודף מלאי",
-  "ביקוש צפוי נמוך מהחיזוי", "אחר",
-];
+/* ----- decision state -----
+   The trade agreement IS the approved forecast: the SCM owns this value,
+   sees its impact vs the original (provider) forecast, and locks it in.
+   No in-system approval workflow — coordination with trade is done directly. */
+const DEC_HE = { awaiting: "דורש החלטה", locked: "נעול", closed: "הסתיים" };
+const STATUS_CHIPS = [["all", "הכל"], ["awaiting", "דורש החלטה"], ["locked", "נעול"], ["ongoing", "פעילים"], ["completed", "הסתיימו"]];
 function loadDecisions() {
   try { return JSON.parse(localStorage.getItem("cp_decisions") || "{}"); } catch (e) { return {}; }
 }
@@ -477,27 +470,17 @@ function setDecision(pid, dec) {
   if (dec === null) delete state._decisions[pid]; else state._decisions[pid] = dec;
   saveDecisions();
 }
-function loadRevisions() {
-  try { return JSON.parse(localStorage.getItem("cp_revisions") || "[]"); } catch (e) { return []; }
-}
-function pushRevision(rec) {
-  state._revisions = state._revisions || [];
-  state._revisions.unshift(rec);
-  localStorage.setItem("cp_revisions", JSON.stringify(state._revisions));
-}
-// effective approved forecast for a promo (a logged decision can override it)
-function approvedOf(p) {
+// effective trade-agreement / approved value (an SCM edit can override the seed)
+function effectiveTrade(p) {
   const dec = getDecision(p.promo_id);
   if (dec && dec.value != null) return Number(dec.value);
-  return Number(p.approved_forecast_total || 0);
+  return Number(p.trade_agreement_qty || 0);
 }
 function promoDecisionStatus(p) {
-  const dec = getDecision(p.promo_id);
-  if (dec) return dec.status;
-  const ph = p._phase || promoPhase(p);
-  const appr = Number(p.approved_forecast_total || 0), trade = Number(p.trade_agreement_qty || 0);
-  if (ph !== "COMPLETED" && trade > 0 && Math.abs(appr - trade) / trade >= 0.005) return "awaiting";
-  return "aligned";
+  const dec = getDecision(p.promo_id), ph = p._phase || promoPhase(p);
+  if (dec && dec.locked) return "locked";
+  if (ph === "COMPLETED") return "closed";
+  return "awaiting";
 }
 
 /* ----- deterministic synthesis (so POC numbers are stable per promo) ----- */
@@ -509,14 +492,15 @@ function hashFrac(seed) {
 const jit = (seed, lo, hi) => lo + (hi - lo) * hashFrac(seed);
 const vendorDeliveryRate = (p) => Math.round(jit("dlv#" + p.vendor_id + "#" + p.display_type_code, 0.93, 1.12) * 100) / 100;
 
-/* ----- role-colored number + decision pills ----- */
+/* ----- role-colored number + cells ----- */
 const roleNum = (value, role) => `<span dir="ltr" class="role-num ${role}">${num(value)}</span>`;
-function gapInfo(approved, trade) {
-  if (!trade) return null;
-  return { frac: (approved - trade) / trade, pct: Math.round((approved - trade) / trade * 100) };
+// gap of `value` vs reference `ref` (e.g. trade agreement vs original forecast)
+function gapInfo(value, ref) {
+  if (!ref) return null;
+  return { frac: (value - ref) / ref, pct: Math.round((value - ref) / ref * 100) };
 }
-function gapCell(approved, trade) {
-  const gi = gapInfo(approved, trade);
+function gapCell(value, ref) {
+  const gi = gapInfo(value, ref);
   if (gi === null) return `<span class="mut">—</span>`;
   const mag = Math.min(1, Math.abs(gi.frac));
   const w = Math.max(gi.pct === 0 ? 0 : 6, Math.round(mag * 50));
@@ -543,23 +527,19 @@ function startsCell(p) {
   const dd = p._days != null ? p._days : promoDays(p.start_date);
   return `<span style="${dd <= 7 ? "color:var(--state-warn);font-weight:600" : ""}">בעוד ${dd} ימים</span>`;
 }
-function decisionPill(p, clickable) {
+function decisionPill(p) {
   const st = promoDecisionStatus(p);
-  const attr = clickable ? ` data-decfilter="${st === "awaiting" ? "awaiting" : "all"}"` : "";
-  return `<span class="dec-pill ${st}"${attr}>${DEC_HE[st] || st}</span>`;
+  return `<span class="dec-pill ${st}">${DEC_HE[st] || st}</span>`;
 }
 
 PAGES.promotions = async () => {
   const d = await load("/api/promotions");
   if (!d) return `<div class="empty">אין נתונים</div>`;
   state._promo = d;
-  state._promoF = state._promoF || { bucket: "next2w", decision: "all", format: "", display: "", vendor: "", category: "", item: "", ptype: "", wh: "" };
-  if (state._promoF.decision == null) state._promoF.decision = "all";
+  state._promoF = state._promoF || { status: "all", format: "", display: "", vendor: "", category: "", item: "", ptype: "", wh: "", startFrom: "", endTo: "" };
   state._promoX = new Set();
   state._promoOpts = {};
-  state._approvedOverride = {};
   state._decisions = loadDecisions();
-  state._revisions = loadRevisions();
   return `<div id="promo-root"></div>`;
 };
 PAGES.promotions.after = () => {
@@ -567,15 +547,13 @@ PAGES.promotions.after = () => {
   if (!root) return;
   root.addEventListener("change", (e) => {
     const el = e.target.closest("[data-pf]");
-    if (el) { state._promoF[el.dataset.pf] = resolvePf(el.dataset.pf, el.value); renderPromo(); }
+    if (el) { state._promoF[el.dataset.pf] = el.dataset.pf === "format" || el.dataset.pf === "vendor" || el.dataset.pf === "display" || el.dataset.pf === "category" || el.dataset.pf === "item" || el.dataset.pf === "ptype" || el.dataset.pf === "wh" ? resolvePf(el.dataset.pf, el.value) : el.value; renderPromo(); }
   });
   root.addEventListener("click", (e) => {
-    const b = e.target.closest("[data-bucket]");
-    if (b) { state._promoF.bucket = b.dataset.bucket; renderPromo(); return; }
-    const df = e.target.closest("[data-decfilter]");
-    if (df) { state._promoF.decision = df.dataset.decfilter; renderPromo(); return; }
+    const sf = e.target.closest("[data-status]");
+    if (sf) { state._promoF.status = sf.dataset.status; renderPromo(); return; }
     const kf = e.target.closest("[data-kpifilter]");
-    if (kf) { applyKpiFilter(kf.dataset.kpifilter); renderPromo(); return; }
+    if (kf) { state._promoF.status = kf.dataset.kpifilter; renderPromo(); return; }
     const o = e.target.closest("[data-open]");
     if (o) { const s = o.dataset.open; s.startsWith("promo:") ? navigate("promotions/" + s.slice(6)) : openAggPopup(s); return; }
     const t = e.target.closest("[data-toggle]");
@@ -583,21 +561,19 @@ PAGES.promotions.after = () => {
   });
   renderPromo();
 };
-function applyKpiFilter(kind) {
-  const F = state._promoF;
-  if (kind === "awaiting") { F.decision = "awaiting"; F.bucket = "all"; }
-  else if (kind === "shortfall") { F.decision = "shortfall"; F.bucket = "all"; }
-  else if (kind === "soon7") { F.decision = "all"; F.bucket = "next2w"; }
-  else if (kind === "live") { F.decision = "all"; F.bucket = "ongoing"; }
-}
-function decisionFilterOk(p) {
-  const f = state._promoF.decision;
+function statusFilterOk(p) {
+  const f = state._promoF.status, ph = p._phase || promoPhase(p);
   if (!f || f === "all") return true;
-  const st = promoDecisionStatus(p);
-  if (f === "awaiting") return st === "awaiting";
-  if (f === "decided") return st === "accepted" || st === "matched";
-  if (f === "change_requested") return st === "change_requested";
-  if (f === "shortfall") return Number(p.trade_agreement_qty || 0) > 0 && approvedOf(p) < Number(p.trade_agreement_qty || 0);
+  if (f === "awaiting") return promoDecisionStatus(p) === "awaiting";
+  if (f === "locked") return promoDecisionStatus(p) === "locked";
+  if (f === "ongoing") return ph === "ONGOING";
+  if (f === "completed") return ph === "COMPLETED";
+  return true;
+}
+function dateFilterOk(p) {
+  const F = state._promoF;
+  if (F.startFrom && p.start_date < F.startFrom) return false;
+  if (F.endTo && p.end_date > F.endTo) return false;
   return true;
 }
 
@@ -606,10 +582,7 @@ function promoScope() {
   const promos = (d.promotions || []).filter((p) => p.activity_type === "REGULAR_UNIVERSE")
     .map((p) => ({ ...p, _phase: promoPhase(p), _days: promoDays(p.start_date), _disc: promoDisc(p) }));
   const pmap = {}; promos.forEach((p) => { pmap[p.promo_id] = p; });
-  const inBucket = (p) => F.bucket === "all" ? true
-    : F.bucket === "next2w" ? (p._phase === "UPCOMING" && p._days <= 14)
-    : F.bucket === "ongoing" ? p._phase === "ONGOING"
-    : p._phase === "COMPLETED";
+  const inScope = (p) => statusFilterOk(p) && dateFilterOk(p);
   const dimOk = (a) => (!F.format || a.format_code === F.format)
     && (!F.display || a.display_type_code === F.display)
     && (!F.vendor || a.vendor_id === F.vendor)
@@ -618,10 +591,10 @@ function promoScope() {
     && (!F.ptype || a.promo_type_code === F.ptype)
     && (!F.wh || (a.managing_warehouse_id || "") === F.wh);
   // "lines" are per-promo-item aggregates (store rows are loaded on drill)
-  const allocs = (d.promo_items || []).filter((a) => { const p = pmap[a.promo_id]; return p && inBucket(p) && dimOk(a); });
+  const allocs = (d.promo_items || []).filter((a) => { const p = pmap[a.promo_id]; return p && inScope(p) && dimOk(a); });
   const whCat = (w) => { const it = LK.items[w.item_barcode]; return it ? it.dept_lv2_code : null; };
   const whsup = (d.wh_supply || []).filter((w) => {
-    const p = pmap[w.promo_id]; if (!p || !inBucket(p)) return false;
+    const p = pmap[w.promo_id]; if (!p || !inScope(p)) return false;
     return (!F.format || p.format_code === F.format) && (!F.display || p.display_type_code === F.display)
       && (!F.vendor || w.vendor_id === F.vendor) && (!F.category || whCat(w) === F.category)
       && (!F.item || w.item_barcode === F.item)
@@ -665,21 +638,7 @@ function storeCountOf(pids, pmap) {
   return s.size;
 }
 function aggNode(node) {
-  const a = node.allocs || [];
-  const pids = new Set(a.map((x) => x.promo_id));
-  let trade = 0;
-  if (node.kind === "promo") trade = Number(node.promo && node.promo.trade_agreement_qty || 0);
-  else pids.forEach((pid) => { trade += Number(node.pmap[pid] && node.pmap[pid].trade_agreement_qty || 0); });
-  let appr = sumOf(a, "approved_forecast_qty");
-  if (node.kind === "format" && state._approvedOverride[node.fmt] != null) appr = Number(state._approvedOverride[node.fmt]);
-  const ord = sumOf(a, "store_ordered_qty"), sold = sumOf(a, "sold_qty"), recom = sumOf(a, "store_recommended_qty");
-  return {
-    storeCount: storeCountOf(pids, node.pmap),
-    itemCount: new Set(a.map((x) => x.item_barcode)).size,
-    orig: sumOf(a, "original_forecast_qty"), appr, ord, sold, recom, trade,
-    fq: fqAcc(sold, appr), fqRatio: (sold > 0 && appr > 0) ? sold / appr : null,
-    adopt: recom > 0 ? cap100(Math.round(ord / recom * 100)) : null,
-  };
+  return { orig: sumOf(node.allocs || [], "original_forecast_qty") };
 }
 function nodeHasAwaiting(node) {
   if (node.kind === "promo") return node.promo && promoDecisionStatus(node.promo) === "awaiting" ? 1 : 0;
@@ -698,18 +657,20 @@ function sortPromoTree(nodes) {
   });
   nodes.forEach((n) => { if (n.children) sortPromoTree(n.children); });
 }
+function nodeTrade(node) {
+  if (node.kind === "promo") return effectiveTrade(node.promo);
+  return [...new Set(node.allocs.map((a) => a.promo_id))].reduce((s, pid) => s + (node.pmap[pid] ? effectiveTrade(node.pmap[pid]) : 0), 0);
+}
 function renderPromoNode(node) {
   const m = aggNode(node);
   const isPromo = node.kind === "promo";
   const exp = !isPromo && state._promoX.has(node.id);
-  const provider = m.orig, trade = m.trade;
-  const approved = isPromo ? approvedOf(node.promo) : m.appr;
-  const chevron = isPromo ? `<span style="display:inline-block;width:14px"></span>`
-    : `<span style="display:inline-block;width:14px">${exp ? "▾" : "▸"}</span>`;
-  const name = `<span data-open="${esc(node.open)}" style="cursor:pointer;text-decoration:underline dotted"><span dir="auto" class="${isPromo ? "" : "strong"}">${esc(node.label)}</span></span>${isPromo ? " " + lifecyclePill(node.promo) : ""}`;
-  const rowAttr = isPromo ? `class="clickable"` : `data-toggle="${esc(node.id)}" class="clickable"`;
+  const provider = m.orig, trade = nodeTrade(node);
+  const chevron = `<span class="tree-chev">${isPromo ? "" : (exp ? "▾" : "▸")}</span>`;
+  const name = `<span class="tree-name" data-open="${esc(node.open)}"><span dir="auto" class="${isPromo ? "" : "strong"}">${esc(node.label)}</span></span>${isPromo ? " " + lifecyclePill(node.promo) : ""}`;
+  const rowCls = isPromo ? "leaf clickable" : "agg clickable";
+  const rowAttr = isPromo ? `class="${rowCls}"` : `data-toggle="${esc(node.id)}" class="${rowCls}"`;
   const pN = roleNum(provider, isPromo ? "provider" : "muted");
-  const aN = roleNum(approved, isPromo ? "approved" : "muted");
   const tN = trade ? roleNum(trade, isPromo ? "agreement" : "muted") : `<span class="mut">—</span>`;
   let decCell, startCell;
   if (isPromo) {
@@ -718,120 +679,74 @@ function renderPromoNode(node) {
   } else {
     const awaiting = [...new Set(node.allocs.map((a) => a.promo_id))]
       .filter((pid) => node.pmap[pid] && promoDecisionStatus(node.pmap[pid]) === "awaiting").length;
-    decCell = awaiting ? `<span class="dec-count" data-decfilter="awaiting">${awaiting} דורש החלטה</span>` : `<span class="mut">—</span>`;
+    decCell = awaiting ? `<span class="dec-count" data-status="awaiting">${awaiting}</span>` : `<span class="mut">—</span>`;
     startCell = `<span class="mut">—</span>`;
   }
   const row = `<tr ${rowAttr}>
-    <td style="padding-inline-start:${node.depth * 18 + 12}px">${chevron} ${name}</td>
+    <td style="padding-inline-start:${node.depth * 18 + 12}px">${chevron}${name}</td>
     <td class="num">${pN}</td>
-    <td class="num">${aN}</td>
     <td class="num">${tN}</td>
-    <td class="num">${gapCell(approved, trade)}</td>
+    <td class="num">${gapCell(trade, provider)}</td>
     <td>${decCell}</td>
     <td>${startCell}</td></tr>`;
   return row + (exp ? node.children.map(renderPromoNode).join("") : "");
 }
 
 /* aggregate-level popups (format / vendor / display) */
-function aggMetrics(allocs, pmap, override) {
+function aggMetrics(allocs, pmap) {
   const pids = new Set(allocs.map((a) => a.promo_id));
-  const apprRolled = sumOf(allocs, "approved_forecast_qty");
-  const appr = override != null ? Number(override) : apprRolled;
-  const ord = sumOf(allocs, "store_ordered_qty"), sold = sumOf(allocs, "sold_qty"), recom = sumOf(allocs, "store_recommended_qty");
-  let trade = 0, disc = 0, otif = 0, avail = 0, shrink = 0, n = 0;
-  pids.forEach((pid) => { const p = pmap[pid]; if (p) { trade += Number(p.trade_agreement_qty || 0); disc += Number(p._disc || 0); otif += Number(p.otif_pct || 0); avail += Number(p.availability_pct || 0); shrink += Number(p.shrink_pct || 0); n++; } });
+  let trade = 0;
+  pids.forEach((pid) => { const p = pmap[pid]; if (p) trade += effectiveTrade(p); });
   return {
     storeCount: storeCountOf(pids, pmap), promoCount: pids.size,
     itemCount: new Set(allocs.map((a) => a.item_barcode)).size,
-    orig: sumOf(allocs, "original_forecast_qty"), appr, apprRolled, ord, sold, recom, trade,
-    fq: fqAcc(sold, appr), fqRatio: (sold > 0 && appr > 0) ? sold / appr : null,
-    adopt: recom > 0 ? cap100(Math.round(ord / recom * 100)) : null,
-    disc: n ? Math.round(disc / n) : null, cover: trade > 0 ? cap100(Math.round(appr / trade * 100)) : null,
-    otif: n ? cap100(Math.round(otif / n)) : null, avail: n ? cap100(Math.round(avail / n)) : null,
-    shrink: n ? (shrink / n).toFixed(1) : null,
+    orig: sumOf(allocs, "original_forecast_qty"), trade,
   };
-}
-function aggKpiChips(m, adoptW) {
-  const chip = (v, l) => `<div class="chip"><div class="c-val">${v}</div><div class="c-lbl">${l}</div></div>`;
-  return `<div class="chips">${chip(m.storeCount, "סניפים")}${chip(m.itemCount, "פריטים")}${chip(m.promoCount, "מבצעים")}
-    ${chip(m.disc == null ? "—" : m.disc + "%", "% הנחה")}${chip(m.fq == null ? "—" : m.fq + "%", "איכות חיזוי")}
-    ${chip(m.adopt == null ? "—" : m.adopt + "%", "אימוץ סניפים")}${chip(adoptW == null ? "—" : cap100(adoptW) + "%", "אימוץ מחסנים")}
-    ${chip(m.cover == null ? "—" : m.cover + "%", "כיסוי הסכם")}${chip(m.otif == null ? "—" : m.otif + "%", "OTIF")}
-    ${chip(m.avail == null ? "—" : m.avail + "%", "זמינות")}${chip(m.shrink == null ? "—" : m.shrink + "%", "פחת")}</div>`;
 }
 function aggBreakdown(allocs, pmap, keyFn, labelFn, openFn, colTitle) {
   let rows = "";
   for (const [k, arr] of groupMap(allocs, keyFn)) {
-    const m = aggMetrics(arr, pmap, null);
+    const m = aggMetrics(arr, pmap);
     rows += `<tr class="clickable" data-open="${esc(openFn(k))}">
-      <td><span dir="auto">${esc(labelFn(k))}</span></td><td class="num">${m.storeCount}</td><td class="num">${m.itemCount}</td>
-      <td class="num">${num(m.orig)}</td><td class="num">${num(m.appr)}</td><td class="num">${num(m.ord)}</td>
-      <td class="num">${m.sold ? num(m.sold) : "—"}</td>
-      <td class="num">${m.fq == null ? "—" : `<span class="badge ${fqTone(m.fq)}">${m.fq}%</span>`}</td>
-      <td class="num">${m.adopt == null ? "—" : `<span class="badge ${adoptTone(m.adopt)}">${m.adopt}%</span>`}</td></tr>`;
+      <td><span dir="auto">${esc(labelFn(k))}</span></td>
+      <td class="num">${roleNum(m.orig, "provider")}</td>
+      <td class="num">${m.trade ? roleNum(m.trade, "agreement") : "—"}</td>
+      <td class="num">${gapCell(m.trade, m.orig)}</td></tr>`;
   }
-  return `<h4>${esc(colTitle)} — לחיצה לפירוט</h4><div class="table-wrap"><table class="data"><thead><tr><th>${esc(colTitle)}</th><th class="num">סניפים</th><th class="num">פריטים</th><th class="num">מקורי</th><th class="num">מאושר</th><th class="num">הוזמן</th><th class="num">נמכר</th><th class="num">איכות</th><th class="num">אימוץ</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  return `<h4>${esc(colTitle)}</h4><div class="table-wrap"><table class="data"><thead><tr><th>${esc(colTitle)}</th><th class="num">חיזוי מקורי</th><th class="num">הסכם מסחרי</th><th class="num">פער מול מקורי</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 function openAggPopup(spec) {
   const ci = spec.indexOf(":"); const kind = spec.slice(0, ci), arg = spec.slice(ci + 1);
-  const { allocs, whsup, pmap } = promoScope();
-  let na, nw, title, fmt = null, breakdown = "";
+  const { allocs, pmap } = promoScope();
+  let na, title, breakdown = "";
   if (kind === "fmt") {
-    fmt = arg;
     na = allocs.filter((a) => a.format_code === arg);
-    nw = whsup.filter((w) => pmap[w.promo_id] && pmap[w.promo_id].format_code === arg);
     title = "פורמט · " + formatName(arg);
     breakdown = aggBreakdown(na, pmap, (a) => a.vendor_id, (v) => LK.vendors[v] || v, (v) => "ven:" + arg + "|" + v, "ספקים");
   } else if (kind === "ven") {
     const [f, v] = arg.split("|");
     na = allocs.filter((a) => a.format_code === f && a.vendor_id === v);
-    nw = whsup.filter((w) => w.vendor_id === v && pmap[w.promo_id] && pmap[w.promo_id].format_code === f);
     title = "ספק · " + (LK.vendors[v] || v) + " · " + formatName(f);
     breakdown = aggBreakdown(na, pmap, (a) => a.display_type_code, (dd) => displayName(dd), (dd) => "disp:" + f + "|" + v + "|" + dd, "אמצעי תצוגה");
   } else if (kind === "disp") {
     const [f, v, dd] = arg.split("|");
     na = allocs.filter((a) => a.format_code === f && a.vendor_id === v && a.display_type_code === dd);
-    nw = whsup.filter((w) => { const p = pmap[w.promo_id]; return p && p.format_code === f && p.display_type_code === dd && w.vendor_id === v; });
     title = displayName(dd) + " · " + (LK.vendors[v] || v) + " · " + formatName(f);
     breakdown = aggBreakdown(na, pmap, (a) => a.category_code, (cc) => (na.find((x) => x.category_code === cc) || {}).category_name || cc, (cc) => "cat:" + f + "|" + v + "|" + dd + "|" + cc, "היררכיית פריט");
   } else {
     const [f, v, dd, cc] = arg.split("|");
     na = allocs.filter((a) => a.format_code === f && a.vendor_id === v && a.display_type_code === dd && a.category_code === cc);
-    nw = whsup.filter((w) => { const p = pmap[w.promo_id], it = LK.items[w.item_barcode]; return p && p.format_code === f && p.display_type_code === dd && w.vendor_id === v && it && it.dept_lv2_code === cc; });
     const cname = (na[0] && na[0].category_name) || cc;
     title = cname + " · " + displayName(dd) + " · " + (LK.vendors[v] || v);
     breakdown = aggBreakdown(na, pmap, (a) => a.promo_id, (pid) => pmap[pid] ? pmap[pid].description : pid, (pid) => "promo:" + pid, "מבצעים");
   }
-  const override = fmt != null ? state._approvedOverride[fmt] : null;
-  const m = aggMetrics(na, pmap, override);
-  const adoptW = sumOf(nw, "wh_recommended_qty") > 0 ? Math.round(sumOf(nw, "wh_ordered_qty") / sumOf(nw, "wh_recommended_qty") * 100) : null;
-  const weak = m.trade > 0 && m.appr < m.trade;
-  const maxF = Math.max(m.orig, m.appr, m.trade, 1);
-  const bar = (label, val, color) => `<div style="margin:7px 0"><div style="display:flex;justify-content:space-between;font-size:12px"><span>${label}</span><span class="strong">${num(val)}</span></div><div class="bar" style="height:10px"><i style="width:${Math.round(val / maxF * 100)}%;background:${color}"></i></div></div>`;
-  let body = "";
-  if (fmt != null) {
-    const cur = override != null ? override : m.apprRolled;
-    body += `<h4>חיזוי מאושר — רמת פורמט</h4><div class="card" style="background:var(--bg-2)">
-      <div class="card-sub" style="margin-bottom:8px">מנהל שרשרת האספקה מאשר חיזוי לתקופה ברמת הפורמט בלבד. הערך מזין כיסוי הסכם מסחרי ואיכות חיזוי בכל הרמות שמתחת.</div>
-      ${bar("חיזוי מקורי (ספק)", m.orig, "#64748b")}${bar("חיזוי מאושר", m.appr, "#6366f1")}${m.trade ? bar("הסכם מסחרי", m.trade, weak ? "#ef4444" : "#22c55e") : ""}
-      <div style="display:flex;gap:10px;align-items:center;margin-top:12px;flex-wrap:wrap">
-        <label style="font-size:13px;color:var(--text-dim)">חיזוי מאושר (יח'):</label>
-        <input class="search" style="max-width:180px" type="number" min="0" step="100" value="${cur}" data-approved-fmt="${esc(fmt)}" />
-        <span class="mut" style="font-size:12px">${override != null ? "נקבע ידנית" : "ברירת מחדל = סכום מאושר מצטבר"}</span>
-      </div>
-      ${weak ? `<div class="login-error" style="margin-top:10px">⚠ החיזוי המאושר נמוך מההסכם המסחרי — נדרש חיזוק.</div>` : ""}</div>`;
-  }
-  body += `<h4>מדדים</h4>${aggKpiChips(m, adoptW)}${breakdown}`;
-  openModal(esc(title), `${m.promoCount} מבצעים · ${m.storeCount} סניפים`, body);
-  if (fmt != null) {
-    const inp = document.querySelector("#modal-root [data-approved-fmt]");
-    if (inp) inp.addEventListener("change", () => {
-      const v = parseFloat(inp.value);
-      if (isNaN(v)) delete state._approvedOverride[fmt]; else state._approvedOverride[fmt] = v;
-      renderPromo();
-      openAggPopup(spec);
-    });
-  }
+  const m = aggMetrics(na, pmap);
+  const maxF = Math.max(m.orig, m.trade, 1);
+  const bar = (label, val, color) => `<div style="margin:8px 0"><div style="display:flex;justify-content:space-between;font-size:12px"><span>${label}</span><span class="strong" dir="ltr">${num(val)}</span></div><div class="bar" style="height:10px"><i style="width:${Math.round(val / maxF * 100)}%;background:${color}"></i></div></div>`;
+  const body = `<div class="card" style="background:var(--bg-2)">
+    ${bar("חיזוי מקורי", m.orig, "var(--role-provider)")}${m.trade ? bar("הסכם מסחרי", m.trade, "var(--role-agreement)") : ""}</div>
+    ${breakdown}`;
+  openModal(esc(title), `${m.promoCount} מבצעים · ${m.storeCount} סניפים · ${m.itemCount} פריטים`, body);
 }
 
 function renderPromo() {
@@ -859,12 +774,10 @@ function renderPromo() {
     return `<input class="search" style="min-width:180px" list="dl-${key}" data-pf="${key}" placeholder="${esc(ph)}" value="${esc(curOpt ? curOpt.text : "")}" autocomplete="off" />
       <datalist id="dl-${key}">${opts.map((o) => `<option value="${esc(o.text)}"></option>`).join("")}</datalist>`;
   };
-  const buckets = PROMO_BUCKETS.map(([k, lbl]) => `<button class="btn ${F.bucket === k ? "btn-primary" : "btn-ghost"}" data-bucket="${k}" style="width:auto">${lbl}</button>`).join("");
-  const DEC_CHIPS = [["all", "הכל"], ["awaiting", "דורש החלטה"], ["decided", "אושר על ידי"], ["change_requested", "ביקוש שונה"]];
-  const decChips = `<div class="chip-group">${DEC_CHIPS.map(([k, lbl]) =>
-    `<button class="${F.decision === k ? "active" + (k === "awaiting" ? " awaiting" : "") : ""}" data-decfilter="${k}">${lbl}</button>`).join("")}</div>`;
+  const statusChips = `<div class="chip-group">${STATUS_CHIPS.map(([k, lbl]) =>
+    `<button class="${F.status === k ? "active" + (k === "awaiting" ? " awaiting" : "") : ""}" data-status="${k}">${lbl}</button>`).join("")}</div>`;
 
-  // ---- decision-aware KPIs: dim-filtered, but across ALL phases (not the time bucket) ----
+  // ---- KPIs: dim + date filtered, across all phases (independent of the status chip) ----
   const dimScoped = (d.promotions || []).filter((p) => p.activity_type === "REGULAR_UNIVERSE")
     .map((p) => ({ ...p, _phase: promoPhase(p), _days: promoDays(p.start_date), _disc: promoDisc(p) }))
     .filter((p) => {
@@ -873,6 +786,7 @@ function renderPromo() {
       if (F.vendor && p.vendor_id !== F.vendor) return false;
       if (F.ptype && p.promo_type_code !== F.ptype) return false;
       if (F.wh && (p.managing_warehouse_id || "") !== F.wh) return false;
+      if (!dateFilterOk(p)) return false;
       if (F.item || F.category) {
         const its = (d.promo_items || []).filter((a) => a.promo_id === p.promo_id);
         if (F.item && !its.some((a) => a.item_barcode === F.item)) return false;
@@ -881,55 +795,56 @@ function renderPromo() {
       return true;
     });
   const awaiting = dimScoped.filter((p) => promoDecisionStatus(p) === "awaiting");
-  const shortfall = dimScoped.filter((p) => p._phase !== "COMPLETED" && Number(p.trade_agreement_qty || 0) > 0 && approvedOf(p) < Number(p.trade_agreement_qty || 0));
-  const sumAtRisk = shortfall.reduce((a, p) => a + (Number(p.trade_agreement_qty || 0) - approvedOf(p)) * Number(p.promo_price || p.catalog_price || 0), 0);
-  const gapsActive = dimScoped.filter((p) => p._phase !== "COMPLETED" && Number(p.trade_agreement_qty || 0) > 0).map((p) => (approvedOf(p) - Number(p.trade_agreement_qty)) / Number(p.trade_agreement_qty) * 100);
+  const locked = dimScoped.filter((p) => promoDecisionStatus(p) === "locked");
+  const gapsActive = dimScoped.filter((p) => p._phase !== "COMPLETED" && Number(p.original_forecast_total || 0) > 0)
+    .map((p) => (effectiveTrade(p) - Number(p.original_forecast_total)) / Number(p.original_forecast_total) * 100);
   const avgGap = gapsActive.length ? Math.round(gapsActive.reduce((a, x) => a + x, 0) / gapsActive.length) : null;
   const soon7 = dimScoped.filter((p) => p._phase === "UPCOMING" && p._days <= 7);
   const live = dimScoped.filter((p) => p._phase === "ONGOING");
 
-  const dtile = (val, lbl, accent, sub, filterKind) =>
+  const dtile = (val, lbl, accent, filterKind) =>
     `<div class="kpi-d ${filterKind ? "clickable" : ""}" ${filterKind ? `data-kpifilter="${filterKind}"` : ""}>
       <div class="k-accent" style="background:${accent}"></div>
-      <div class="k-lbl">${lbl}</div><div class="k-val">${val}</div>${sub ? `<div class="k-sub">${sub}</div>` : ""}</div>`;
-  const arrow = avgGap == null ? "" : (avgGap > 0 ? `<span class="arrow" style="color:var(--role-agreement)">▲</span>` : avgGap < 0 ? `<span class="arrow" style="color:var(--state-bad)">▼</span>` : "");
+      <div class="k-lbl">${lbl}</div><div class="k-val">${val}</div></div>`;
+  const arrow = avgGap == null || avgGap === 0 ? "" : (avgGap > 0 ? ` <span class="arrow" style="color:var(--role-agreement)">▲</span>` : ` <span class="arrow" style="color:var(--state-bad)">▼</span>`);
   const kpis = `<div class="kpi-d-grid section">
-    ${dtile(String(awaiting.length), "דורשים החלטה", "var(--action)", "מאושר ≠ הסכם, טרם הוחלט", "awaiting")}
-    ${dtile(money(Math.round(sumAtRisk)), "סכום בסיכון", "var(--role-agreement)", "ערך מסחרי של פערים מתחת להסכם", "shortfall")}
-    ${dtile(avgGap == null ? "—" : (avgGap > 0 ? "+" : "") + avgGap + "%" + arrow, "פער ממוצע", "var(--role-agreement)", "מאושר מול הסכם, מבצעים פעילים")}
-    ${dtile(String(soon7.length), "מתחילים תוך 7 ימים", "var(--state-warn)", "טרם הופצו", "soon7")}
-    ${dtile(String(live.length), "פעילים כעת", "var(--state-info)", "בין תאריך התחלה לסיום", "live")}
+    ${dtile(String(awaiting.length), "דורשים החלטה", "var(--action)", "awaiting")}
+    ${dtile(String(locked.length), "נעולים", "var(--role-approved)", "locked")}
+    ${dtile(avgGap == null ? "—" : (avgGap > 0 ? "+" : "") + avgGap + "%" + arrow, "פער ממוצע מול מקורי", "var(--role-agreement)")}
+    ${dtile(String(soon7.length), "מתחילים תוך 7 ימים", "var(--state-warn)")}
+    ${dtile(String(live.length), "פעילים כעת", "var(--state-info)", "ongoing")}
   </div>`;
 
-  // ---- alert band: concrete decision call ----
-  const gap10 = dimScoped.filter((p) => { if (p._phase === "COMPLETED") return false; const gi = gapInfo(approvedOf(p), Number(p.trade_agreement_qty || 0)); return gi && Math.abs(gi.frac) >= 0.10; });
+  // ---- alert band: concrete review call (big gap vs original, not yet locked) ----
+  const gap10 = awaiting.filter((p) => { const gi = gapInfo(effectiveTrade(p), Number(p.original_forecast_total || 0)); return gi && Math.abs(gi.frac) >= 0.10; });
   const gap10soon = gap10.filter((p) => p._phase === "UPCOMING" && p._days <= 7);
   const alertBand = gap10.length ? `<div class="alert-band">
-    <p><b class="num">${gap10.length}</b> מבצעים עם פער של 10%+ בין החיזוי המאושר להסכם המסחרי. <a class="linkish" data-decfilter="awaiting">לסקירה והחלטה לפני תחילת הקמפיין.</a></p>
-    ${gap10soon.length ? `<p><b class="num">${gap10soon.length}</b> מתוכם מתחילים ב-7 הימים הקרובים — ממוינים לראש הרשימה.</p>` : ""}
+    <p><b class="num">${gap10.length}</b> מבצעים עם פער 10%+ בין ההסכם המסחרי לחיזוי המקורי, טרם ננעלו. <a class="linkish" data-status="awaiting">לסקירה ונעילה.</a>${gap10soon.length ? ` <b class="num">${gap10soon.length}</b> מתחילים תוך 7 ימים.` : ""}</p>
   </div>` : "";
 
-  const treeAllocs = allocs.filter((a) => decisionFilterOk(pmap[a.promo_id]));
-  const tree = buildPromoTree(treeAllocs, pmap);
+  const tree = buildPromoTree(allocs, pmap);
   sortPromoTree(tree);
   const treeRows = tree.map(renderPromoNode).join("");
-  const header = `<tr><th>פורמט → ספק → אמצעי תצוגה → היררכיה → מבצע</th><th class="num">חיזוי מקורי</th><th class="num">חיזוי מאושר</th><th class="num">הסכם מסחרי</th><th class="num">פער</th><th>החלטה</th><th>מתחיל</th></tr>`;
+  const header = `<tr><th>פורמט → ספק → תצוגה → היררכיה → מבצע</th><th class="num">חיזוי מקורי</th><th class="num">הסכם מסחרי</th><th class="num">פער מול מקורי</th><th>החלטה</th><th>מתחיל</th></tr>`;
+  const dInput = (key, ph) => `<input type="date" class="select" style="min-width:150px" data-pf="${key}" value="${esc(F[key] || "")}" title="${esc(ph)}" placeholder="${esc(ph)}" />`;
 
   root.innerHTML = `
-    <div class="card-sub" style="margin-bottom:14px">פעילות שוטפת (יוניברס) — מנהל שרשרת האספקה מחליט על החיזוי המאושר לכל מבצע: <b style="color:var(--role-approved)">אישור</b>, <b style="color:var(--role-agreement)">התאמה להסכם</b>, או <b style="color:var(--role-provider)">בקשת שינוי</b>. צבע מזהה את מקור המספר: <span class="role-num provider">מקורי</span> · <span class="role-num approved">מאושר</span> · <span class="role-num agreement">הסכם</span>.</div>
+    <div class="card-sub" style="margin-bottom:12px">קביעת החיזוי המאושר (הסכם מסחרי) לכל מבצע מול החיזוי המקורי. צבע מזהה מקור: <span class="role-num provider">מקורי</span> · <span class="role-num agreement">הסכם מסחרי</span>.</div>
     ${alertBand}
     ${kpis}
-    <div class="filters section" style="align-items:center">${decChips}<div style="flex:1"></div>${buckets}</div>
+    <div class="filters section">${statusChips}</div>
     <div class="filters">
-      ${combo("format", "פורמט — הקלד קוד/תיאור")}
-      ${combo("vendor", "ספק — הקלד קוד/שם")}
-      ${combo("display", "אמצעי תצוגה — קוד/תיאור")}
-      ${combo("category", "היררכיית פריט")}
-      ${combo("item", "פריט — קוד/תיאור")}
+      ${combo("format", "פורמט")}
+      ${combo("vendor", "ספק")}
+      ${combo("display", "אמצעי תצוגה")}
+      ${combo("category", "היררכיה")}
+      ${combo("item", "פריט")}
       ${combo("ptype", "סוג מבצע")}
-      ${combo("wh", "מחסן מנהל")}
+      ${combo("wh", "מחסן")}
+      ${dInput("startFrom", "מתאריך התחלה")}
+      ${dInput("endTo", "עד תאריך סיום")}
     </div>
-    <div class="section table-wrap"><table class="data"><thead>${header}</thead><tbody>${treeRows || `<tr><td colspan="7"><div class="empty">אין מבצעים בהיקף הנבחר</div></td></tr>`}</tbody></table></div>`;
+    <div class="section table-wrap"><table class="data promo-tree"><thead>${header}</thead><tbody>${treeRows || `<tr><td colspan="6"><div class="empty">אין מבצעים בהיקף הנבחר</div></td></tr>`}</tbody></table></div>`;
 }
 
 PAGES.cannibalization = async () => {
@@ -1118,15 +1033,15 @@ async function promoDetail(pid) {
 /* promo drill assortment tree: store -> מקבץ leader -> member barcodes
    (standalone items render as a store+item leaf). */
 function drillAgg(rows) {
-  const o = sumOf(rows, "original_forecast_qty"), a = sumOf(rows, "approved_forecast_qty");
+  const o = sumOf(rows, "original_forecast_qty");
   const r = sumOf(rows, "store_recommended_qty"), ord = sumOf(rows, "store_ordered_qty"), s = sumOf(rows, "sold_qty");
-  return { o, a, r, ord, s, fq: fqAcc(s, a), adopt: r > 0 ? cap100(Math.round(ord / r * 100)) : null };
+  return { o, r, ord, s, fq: fqAcc(s, o), adopt: r > 0 ? cap100(Math.round(ord / r * 100)) : null };
 }
 function drillRow(depth, toggleId, exp, hasChildren, label, m) {
-  const chev = hasChildren ? (exp ? "▾" : "▸") : "";
+  const chev = hasChildren ? `<span class="tree-chev">${exp ? "▾" : "▸"}</span>` : `<span class="tree-chev" style="background:transparent;border-color:transparent"></span>`;
   const attr = toggleId ? `data-ptree="${esc(toggleId)}" class="clickable"` : "";
-  return `<tr ${attr}><td style="padding-inline-start:${depth * 18 + 12}px"><span style="display:inline-block;width:14px">${chev}</span> ${label}</td>
-    <td class="num">${num(m.o)}</td><td class="num">${num(m.a)}</td><td class="num">${num(m.r)}</td><td class="num">${num(m.ord)}</td><td class="num">${m.s ? num(m.s) : "—"}</td>
+  return `<tr ${attr}><td style="padding-inline-start:${depth * 18 + 12}px">${chev}${label}</td>
+    <td class="num">${roleNum(m.o, "provider")}</td><td class="num">${num(m.r)}</td><td class="num">${num(m.ord)}</td><td class="num">${m.s ? num(m.s) : "—"}</td>
     <td class="num">${m.fq == null ? "—" : `<span class="badge ${fqTone(m.fq)}">${m.fq}%</span>`}</td>
     <td class="num">${m.adopt == null ? "—" : `<span class="badge ${adoptTone(m.adopt)}">${m.adopt}%</span>`}</td></tr>`;
 }
@@ -1157,7 +1072,7 @@ function renderDrillTree(allocs) {
       html += drillRow(0, null, false, false, `${store} · <span dir="auto">${esc(a.item_desc)}</span> <span class="mut" style="font-size:11px">${esc(a.item_barcode)}</span>`, drillAgg(b.rows));
     }
   }
-  return `<div class="table-wrap"><table class="data"><thead><tr><th>סניף · מקבץ/פריט → ברקודים</th><th class="num">חיזוי מקורי</th><th class="num">חיזוי מאושר</th><th class="num">המלצה</th><th class="num">הוזמן</th><th class="num">נמכר</th><th class="num">איכות</th><th class="num">אימוץ</th></tr></thead><tbody>${html}</tbody></table></div>`;
+  return `<div class="table-wrap"><table class="data"><thead><tr><th>סניף · מקבץ/פריט → ברקודים</th><th class="num">חיזוי מקורי</th><th class="num">המלצה</th><th class="num">הוזמן</th><th class="num">נמכר</th><th class="num">איכות</th><th class="num">אימוץ</th></tr></thead><tbody>${html}</tbody></table></div>`;
 }
 
 /* ============================================================
@@ -1168,8 +1083,7 @@ function addDaysIso(iso, n) { const dt = new Date(iso); dt.setDate(dt.getDate() 
 
 function promoModel(p, det) {
   const provider = Number(p.original_forecast_total || 0);
-  const approved = approvedOf(p);
-  const agreement = Number(p.trade_agreement_qty || 0);
+  const value = effectiveTrade(p);            // the trade agreement = approved forecast
   const sold = Number(p.sold_total || 0);
   const deliveryRate = vendorDeliveryRate(p);
   const expectedDemand = Math.round(provider * deliveryRate);
@@ -1181,10 +1095,9 @@ function promoModel(p, det) {
   const whRecom = sumOf(whsup, "wh_recommended_qty") || Number(p.wh_recommended_total || 0);
   const onHand = Math.round(whRecom * jit("oh#" + p.promo_id, 0.7, 1.05));
   const inTransit = Math.round(whRecom * jit("it#" + p.promo_id, 0.4, 0.85));
-  const higher = Math.max(approved, agreement);
-  const whCovered = higher > 0 ? Math.round((onHand + inTransit) / higher * 100) : null;
-  return { provider, approved, agreement, sold, deliveryRate, expectedDemand, phase, actualProjected,
-    onHand, inTransit, higher, whCovered, hasWh: whsup.length > 0 || Number(p.wh_recommended_total || 0) > 0 };
+  const whCovered = value > 0 ? Math.round((onHand + inTransit) / value * 100) : null;
+  return { provider, value, sold, deliveryRate, expectedDemand, phase, actualProjected,
+    onHand, inTransit, whCovered, hasWh: whsup.length > 0 || Number(p.wh_recommended_total || 0) > 0 };
 }
 function candidateCost(p, m, qty) {
   const demand = m.expectedDemand;
@@ -1193,21 +1106,20 @@ function candidateCost(p, m, qty) {
   const excessVal = excessUnits * unitCost;
   const excessCost = Math.round(excessVal * 0.0008 * 30 + excessVal * (Number(p.shrink_pct || 2) / 100) + excessVal * 0.03);
   return { qty, excessUnits, shortUnits, excessCost, lostSale: Math.round(shortUnits * promoPrice),
-    expectedSales: Math.round(Math.min(qty, demand)), revenue: Math.round(Math.min(qty, demand) * promoPrice),
-    coverage: m.agreement > 0 ? Math.round(qty / m.agreement * 100) : null };
+    expectedSales: Math.round(Math.min(qty, demand)), revenue: Math.round(Math.min(qty, demand) * promoPrice) };
 }
 
 function decisionRuler(m) {
   const W = 900, H = 124, padX = 46, axisY = 64;
-  const vals = [m.provider, m.approved, m.agreement]; if (m.actualProjected != null) vals.push(m.actualProjected);
+  const vals = [m.provider, m.value]; if (m.actualProjected != null) vals.push(m.actualProjected);
   const max = Math.max(...vals, 1) * 1.1;
   const x = (v) => padX + (v / max) * (W - 2 * padX);
-  const lo = Math.min(m.approved, m.agreement), hi = Math.max(m.approved, m.agreement);
-  const markers = [["#6B8FC9", m.provider, "חיזוי מקורי"], ["#5EBA8C", m.approved, "חיזוי מאושר"], ["#C9A36A", m.agreement, "הסכם מסחרי"]];
+  const lo = Math.min(m.provider, m.value), hi = Math.max(m.provider, m.value);
+  const markers = [["#6B8FC9", m.provider, "חיזוי מקורי"], ["#C9A36A", m.value, "הסכם מסחרי"]];
   if (m.actualProjected != null) markers.push(["#9D7BC9", m.actualProjected, "תחזית מכר"]);
   let s = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">`;
   s += `<defs><pattern id="gapstripe" width="9" height="9" patternTransform="rotate(45)" patternUnits="userSpaceOnUse"><rect width="9" height="9" fill="rgba(201,163,106,.14)"/><line x1="0" y1="0" x2="0" y2="9" stroke="rgba(201,163,106,.5)" stroke-width="2"/></pattern></defs>`;
-  if (m.agreement > 0) s += `<rect x="${x(lo)}" y="${axisY - 15}" width="${Math.max(0, x(hi) - x(lo))}" height="30" fill="url(#gapstripe)" rx="3"/>`;
+  s += `<rect x="${x(lo)}" y="${axisY - 15}" width="${Math.max(0, x(hi) - x(lo))}" height="30" fill="url(#gapstripe)" rx="3"/>`;
   s += `<line x1="${padX}" y1="${axisY}" x2="${W - padX}" y2="${axisY}" stroke="#3A4258" stroke-width="2"/>`;
   markers.forEach((mk, i) => {
     const px = x(mk[1]), above = i % 2 === 0;
@@ -1226,92 +1138,59 @@ function trioCard(role, lblEn, lblHe, value, sub, editable) {
     <div class="t-lbl-en">${lblEn}</div><div class="t-lbl-he">${lblHe}</div>
     <div class="trio-val" style="color:${color}" dir="ltr">${num(value)}</div><div class="t-sub">${sub}</div></div>`;
 }
-function approvedSub(p) {
+function decSub(p) {
   const dec = getDecision(p.promo_id);
-  if (dec) return `${DEC_HE[dec.status] || ""} · ${dec.at ? sdate(dec.at) : ""}${dec.by ? " · " + esc(dec.by) : ""}`;
-  return "חיזוי מאושר נוכחי · לא תועדה החלטה";
+  if (dec && dec.locked) return `נעול · ${dec.at ? sdate(dec.at) : ""}${dec.by ? " · " + esc(dec.by) : ""}`;
+  if (dec) return `טיוטה · עודכן ${dec.at ? sdate(dec.at) : ""}`;
+  return "ברירת מחדל — טרם ננעל";
 }
-function decisionBar(p, m, decStatus, dec) {
-  const locked = m.phase === "COMPLETED";
-  const chosen = (k) => (dec && dec.status === k ? "chosen" : "");
-  return `<div class="dec-bar">
-    <button class="dec-btn solid ${chosen("accepted")}" data-act="accept" ${locked ? "disabled" : ""}>✓ אשר חיזוי נוכחי<span class="db-sub" dir="ltr">${num(m.approved)}</span></button>
-    <button class="dec-btn solid ${chosen("matched")}" data-act="match" ${locked ? "disabled" : ""}>⇄ התאם להסכם<span class="db-sub" dir="ltr">${num(m.agreement)}</span></button>
-    <button class="dec-btn outline ${chosen("change_requested")}" data-act="request">📤 בקשת שינוי הסכם</button>
-  </div>${decisionStateLine(p, dec, decStatus, locked)}`;
-}
-function decisionStateLine(p, dec, decStatus, locked) {
-  if (dec) {
-    let txt = "";
-    if (dec.status === "accepted") txt = `אושר חיזוי ${num(dec.value)}`;
-    else if (dec.status === "matched") txt = `הותאם להסכם ${num(dec.value)}${dec.reason ? " · " + esc(dec.reason) : ""}`;
-    else if (dec.status === "change_requested") txt = `נשלחה בקשת שינוי ל-${num(dec.requested)} (${dec.direction === "up" ? "הגדלה" : "הקטנה"})${dec.urgency ? " · " + esc(dec.urgency) : ""}`;
-    return `<div class="dec-state">החלטה אחרונה: <b>${txt}</b>${dec.at ? " · " + sdate(dec.at) : ""}${dec.by ? " · " + esc(dec.by) : ""} &nbsp; <a class="linkish" data-act="reset" style="color:var(--text-mut)">בטל החלטה</a></div>`;
-  }
-  if (locked) return `<div class="dec-state">המבצע הסתיים — תצוגת רטרו בלבד.</div>`;
-  if (decStatus === "awaiting") return `<div class="dec-state">ממתין להחלטה · קיים פער בין החיזוי המאושר להסכם המסחרי.</div>`;
-  return `<div class="dec-state">החיזוי המאושר תואם להסכם — לא נדרשת פעולה.</div>`;
-}
-function renderDecisionPanel(p, m) {
-  const panel = state._pdPanel;
-  if (!panel || panel.pid !== p.promo_id) return "";
-  if (panel.kind === "match") {
-    return `<div class="dec-panel"><h4>התאמת החיזוי המאושר להסכם המסחרי</h4>
-      <div class="pf-row">
-        <div><label>כמות יעד (יח')</label><input class="search" id="match-qty" type="number" min="0" step="100" value="${m.agreement}" style="max-width:160px"></div>
-        <div><label>סיבה</label><select class="select" id="match-reason">${MATCH_REASONS.map((r) => `<option>${esc(r)}</option>`).join("")}</select></div>
-        <div style="flex:1;min-width:200px"><label>הערה (רשות)</label><input class="search" id="match-note" placeholder="פירוט…" style="width:100%"></div>
-      </div>
-      <div class="panel-actions"><button class="dec-btn solid" data-act="match-confirm" style="padding:10px 20px">אישור התאמה</button><button class="dec-btn outline" data-act="panel-cancel" style="padding:10px 18px;border-color:var(--border);color:var(--text-dim)">ביטול</button></div></div>`;
-  }
-  const dir = panel.direction || "down";
-  return `<div class="dec-panel"><h4>בקשת שינוי הסכם מסחרי מול מחלקת הסחר</h4>
-    <div class="pf-row">
-      <div><label>כמות מבוקשת (יח')</label><input class="search" id="req-qty" type="number" min="0" step="100" value="${panel.requested != null ? panel.requested : m.approved}" style="max-width:160px;color:var(--role-agreement);font-weight:700"></div>
-      <div><label>כיוון</label><div class="dir-chip"><button class="${dir === "up" ? "active" : ""}" data-dir="up">הגדלה ▲</button><button class="${dir === "down" ? "active" : ""}" data-dir="down">הקטנה ▼</button></div></div>
-      <div><label>דחיפות</label><select class="select" id="req-urg"><option value="רגילה">רגילה</option><option value="גבוהה">גבוהה</option><option value="דחופה">דחופה</option></select></div>
-      <div style="flex:1;min-width:200px"><label>הודעה לסחר (רשות)</label><input class="search" id="req-msg" placeholder="נימוק הבקשה…" style="width:100%"></div>
+function decisionEdit(p, m) {
+  const dec = getDecision(p.promo_id), locked = !!(dec && dec.locked), closed = m.phase === "COMPLETED";
+  const gi = gapInfo(m.value, m.provider);
+  const impact = gi ? `<b style="color:${gi.pct > 0 ? "var(--role-agreement)" : gi.pct < 0 ? "var(--state-bad)" : "var(--text-dim)"}">${gi.pct > 0 ? "+" : ""}${gi.pct}%</b> מול החיזוי המקורי (<span dir="ltr">${num(m.provider)}</span>)` : "";
+  const actions = closed ? `<span class="mut">המבצע הסתיים</span>`
+    : locked ? `<span class="lock-badge">● נעול</span><button class="dec-btn outline" data-act="unlock" style="padding:9px 16px">פתח לעריכה</button>`
+    : `<button class="dec-btn solid" data-act="lock" style="padding:11px 24px">שמור ונעל</button>`;
+  return `<div class="dec-edit">
+    <div class="de-row">
+      <div><label>חיזוי מאושר — הסכם מסחרי</label><input class="tradeval" id="trade-val" type="number" min="0" step="50" value="${m.value}" ${locked || closed ? "disabled" : ""}></div>
+      <div class="de-impact">${impact}</div>
+      <div class="de-actions">${actions}</div>
     </div>
-    <div class="panel-actions"><button class="dec-btn solid" data-act="request-confirm" style="padding:10px 20px">שליחת בקשה</button><button class="dec-btn outline" data-act="panel-cancel" style="padding:10px 18px;border-color:var(--border);color:var(--text-dim)">ביטול</button></div></div>`;
-}
-function healthTone(kind, value, m) {
-  if (kind === "demand") return value >= m.agreement ? "good" : value >= m.agreement * 0.9 ? "warn" : "bad";
-  if (kind === "wh") return value == null ? "neutral" : value >= 110 ? "good" : value >= 95 ? "warn" : "bad";
-  return "good";
+    <div class="de-note">תיאום מול מחלקת הסחר מתבצע ישירות. לאחר ההסכמה — עדכן כאן את הערך ונעל אותו.</div>
+  </div>`;
 }
 function healthZone(p, m) {
-  const pctVsAgr = m.agreement > 0 ? Math.round((m.provider - m.agreement) / m.agreement * 100) : null;
-  const t1 = healthTone("demand", m.expectedDemand, m);
+  const cost = candidateCost(p, m, m.value);
+  const gi = gapInfo(m.value, m.provider);
+  const t1 = m.expectedDemand >= m.value ? "good" : m.expectedDemand >= m.value * 0.9 ? "warn" : "bad";
   const a1 = t1 === "good" ? "כן — סביר" : t1 === "warn" ? "גבולי" : "לא סביר";
-  const calc1 = `חיזוי מקורי ${pctVsAgr == null ? "—" : (pctVsAgr >= 0 ? "+" : "") + pctVsAgr + "%"} מול ההסכם; הספק מספק היסטורית ${Math.round(m.deliveryRate * 100)}% מהחיזוי → ביקוש צפוי ${num(m.expectedDemand)}.`;
+  const calc1 = `הסכם מסחרי ${gi ? (gi.pct > 0 ? "+" : "") + gi.pct + "%" : "—"} מול המקורי; הספק מספק ${Math.round(m.deliveryRate * 100)}% היסטורית → ביקוש צפוי ${num(m.expectedDemand)}.`;
   let t2, a2, calc2;
-  if (!m.hasWh) { t2 = "neutral"; a2 = "אספקה ישירה"; calc2 = "המבצע באספקה ישירה לסניפים — ללא מחסן מנהל."; }
-  else { t2 = healthTone("wh", m.whCovered, m); a2 = t2 === "good" ? `כן — ${m.whCovered}% כיסוי` : t2 === "warn" ? `חלקית — ${m.whCovered}%` : `לא — ${m.whCovered}%`;
-    calc2 = `מלאי במחסן ${num(m.onHand)} + בדרך ${num(m.inTransit)} מול ${num(m.higher)} (הגבוה מבין המועמדים).`; }
-  const match = candidateCost(p, m, m.agreement);
-  const t3 = match.excessCost <= 0 ? "good" : match.excessUnits > m.agreement * 0.15 ? "bad" : "warn";
-  const a3 = match.excessCost <= 0 ? "₪0 — אין עודף" : money(match.excessCost);
-  const calc3 = `ביקוש צפוי ${num(m.expectedDemand)} מול כמות התאמה ${num(m.agreement)}; עודף ${num(match.excessUnits)} יח'.`;
-  const accept = candidateCost(p, m, m.approved);
-  const t4 = accept.lostSale <= 0 ? "good" : accept.shortUnits > m.expectedDemand * 0.1 ? "bad" : "warn";
-  const a4 = accept.lostSale <= 0 ? "נמוך" : money(accept.lostSale);
-  const calc4 = `אובדן מכירה משוער ${money(accept.lostSale)}; חוסר ${num(accept.shortUnits)} יח' מול ביקוש ${num(m.expectedDemand)}.`;
+  if (!m.hasWh) { t2 = "neutral"; a2 = "אספקה ישירה"; calc2 = "אספקה ישירה לסניפים — ללא מחסן מנהל."; }
+  else { t2 = m.whCovered == null ? "neutral" : m.whCovered >= 110 ? "good" : m.whCovered >= 95 ? "warn" : "bad";
+    a2 = t2 === "good" ? `כן — ${m.whCovered}%` : t2 === "warn" ? `חלקית — ${m.whCovered}%` : `לא — ${m.whCovered}%`;
+    calc2 = `מלאי ${num(m.onHand)} + בדרך ${num(m.inTransit)} מול ${num(m.value)} יח'.`; }
+  const t3 = cost.excessCost <= 0 ? "good" : cost.excessUnits > m.value * 0.15 ? "bad" : "warn";
+  const a3 = cost.excessCost <= 0 ? "₪0 — אין עודף" : money(cost.excessCost);
+  const calc3 = `ביקוש צפוי ${num(m.expectedDemand)} מול כמות ${num(m.value)}; עודף ${num(cost.excessUnits)} יח'.`;
+  const t4 = cost.lostSale <= 0 ? "good" : cost.shortUnits > m.expectedDemand * 0.1 ? "bad" : "warn";
+  const a4 = cost.lostSale <= 0 ? "נמוך" : money(cost.lostSale);
+  const calc4 = `חוסר ${num(cost.shortUnits)} יח' מול ביקוש ${num(m.expectedDemand)}.`;
   const tile = (q, a, t, c) => `<div class="health-tile"><div class="ht-q">${q}</div><div class="ht-a ${t}">${a}</div><div class="ht-calc">${c}</div></div>`;
   return `<div class="health-grid">
-    ${tile("האם המכירות יגיעו לכמות ההסכם המסחרי?", a1, t1, calc1)}
-    ${tile("האם המחסן יכול לספק את הכמות הגבוהה מבין המועמדים?", a2, t2, calc2)}
-    ${tile("אם נתאים את החיזוי להסכם — מה עלות העודף?", a3, t3, calc3)}
-    ${tile("אם נאשר את החיזוי הגבוה — מה סיכון החוסר?", a4, t4, calc4)}</div>`;
+    ${tile("האם המכירות יגיעו לכמות שנקבעה?", a1, t1, calc1)}
+    ${tile("האם המחסן יכול לספק את הכמות?", a2, t2, calc2)}
+    ${tile("אם הביקוש נמוך מהכמות — עלות העודף?", a3, t3, calc3)}
+    ${tile("אם הביקוש גבוה מהכמות — סיכון החוסר?", a4, t4, calc4)}</div>`;
 }
-function outcomeTable(p, m, requested) {
-  const cols = [["col-accept", "אם תאשר (מאושר)", candidateCost(p, m, m.approved)],
-    ["col-match", "אם תתאים (הסכם)", candidateCost(p, m, m.agreement)]];
-  if (requested != null) cols.push(["col-request", "בקשתך", candidateCost(p, m, requested)]);
+function outcomeTable(p, m) {
+  const cols = [["col-match", "הסכם מסחרי (נבחר)", candidateCost(p, m, m.value)],
+    ["col-request", "חיזוי מקורי", candidateCost(p, m, m.provider)]];
   const row = (label, fn) => `<tr><td>${label}</td>${cols.map((c) => `<td>${fn(c[2])}</td>`).join("")}</tr>`;
   return `<table class="outcome"><thead><tr><th></th>${cols.map((c) => `<th class="${c[0]}">${c[1]}<div style="font-size:11px;font-weight:600;opacity:.85" dir="ltr">${num(c[2].qty)}</div></th>`).join("")}</tr></thead><tbody>
     ${row("מכר צפוי", (c) => num(c.expectedSales))}
     ${row("הכנסה צפויה (לאחר הנחה)", (c) => money(c.revenue))}
-    ${row("כיסוי הסכם", (c) => c.coverage == null ? "—" : c.coverage + "%")}
     ${row("עלות עודף מלאי", (c) => money(c.excessCost))}
     ${row("סיכון אובדן מכירה", (c) => money(c.lostSale))}</tbody></table>`;
 }
@@ -1324,13 +1203,13 @@ function historicalComparison(p, m) {
       outcome: deliv >= 105 ? "נמכר, ביקוש גבוה" : deliv >= 98 ? "בריא" : "ביקוש מעורב" };
   };
   const rows = [
-    mk("אותו קמפיין אשתקד", "ly#" + p.promo_id, m.approved),
-    mk(vName + " · " + dName + " · ממוצע 3 מבצעים", "v3#" + p.promo_id, m.approved * 0.82),
-    mk(dName + " · כל הספקים · 6 מבצעים", "d6#" + p.promo_id, m.approved * 0.7),
+    mk("אותו קמפיין אשתקד", "ly#" + p.promo_id, m.value),
+    mk(vName + " · " + dName + " · ממוצע 3 מבצעים", "v3#" + p.promo_id, m.value * 0.82),
+    mk(dName + " · כל הספקים · 6 מבצעים", "d6#" + p.promo_id, m.value * 0.7),
   ];
   const avgDeliv = Math.round(rows.reduce((a, r) => a + r.deliv, 0) / rows.length), over = avgDeliv >= 100;
-  const head = `<div style="font-size:13px;color:var(--text);margin-bottom:12px;line-height:1.6"><span dir="auto" class="strong">${esc(vName)}</span> ${over ? "מספק היסטורית מעל לחיזוי" : "מספק היסטורית מתחת לחיזוי"} ב-<b dir="ltr">${Math.abs(avgDeliv - 100)}%</b> בממוצע — נטייה ל<b style="color:${over ? "var(--role-approved)" : "var(--role-agreement)"}">${over ? "אישור" : "התאמה"}</b> בטוחה יותר סטטיסטית.</div>`;
-  const body = `<table class="outcome"><thead><tr><th>מבצע עבר</th><th>מאושר</th><th>בפועל</th><th>אספקה %</th><th style="text-align:start">תוצאה</th></tr></thead><tbody>
+  const head = `<div style="font-size:13px;color:var(--text);margin-bottom:12px;line-height:1.6"><span dir="auto" class="strong">${esc(vName)}</span> ${over ? "מספק היסטורית מעל לחיזוי" : "מספק היסטורית מתחת לחיזוי"} ב-<b dir="ltr">${Math.abs(avgDeliv - 100)}%</b> בממוצע.</div>`;
+  const body = `<table class="outcome"><thead><tr><th>מבצע עבר</th><th>הסכם</th><th>בפועל</th><th>אספקה %</th><th style="text-align:start">תוצאה</th></tr></thead><tbody>
     ${rows.map((r) => `<tr><td><span dir="auto">${esc(r.label)}</span></td><td>${num(r.appr)}</td><td>${num(r.actual)}</td><td style="color:${r.deliv >= 100 ? "var(--role-approved)" : "var(--state-warn)"}">${r.deliv}%</td><td style="text-align:start;color:var(--text-dim)">${r.outcome}</td></tr>`).join("")}</tbody></table>`;
   return head + body;
 }
@@ -1357,115 +1236,89 @@ function midCampaignBlock(p, m) {
   const dur = Math.max(1, Number(p.duration_days) || 12);
   const elapsed = m.phase === "COMPLETED" ? dur : Math.min(dur, liveDayN(p));
   const labels = [], fc = [], ac = [];
-  for (let day = 0; day <= dur; day++) { labels.push(addDaysIso(p.start_date, day)); fc.push(Math.round(m.approved * day / dur));
+  for (let day = 0; day <= dur; day++) { labels.push(addDaysIso(p.start_date, day)); fc.push(Math.round(m.value * day / dur));
     ac.push(day <= elapsed ? Math.round(m.sold * day / Math.max(1, elapsed)) : null); }
-  const soldPct = m.approved > 0 ? Math.round(m.sold / m.approved * 100) : 0;
+  const soldPct = m.value > 0 ? Math.round(m.sold / m.value * 100) : 0;
   const perfChip = (v, l, u) => `<div class="chip"><div class="c-val">${v == null ? "—" : num(v) + (u || "")}</div><div class="c-lbl">${l}</div></div>`;
   return `<div class="card-sub" style="margin:2px 0 10px">יום ${elapsed} מתוך ${dur} · ${soldPct}% מהחיזוי נמכר</div>
     ${cumChart(labels, fc, ac, elapsed)}
     <div class="chips" style="margin-top:14px">
-      ${perfChip(fqAcc(m.sold, m.approved), "איכות חיזוי", "%")}
+      ${perfChip(fqAcc(m.sold, m.value), "איכות חיזוי", "%")}
       ${perfChip(cap100(Number(p.otif_pct)), "OTIF", "%")}
       ${perfChip(cap100(Number(p.availability_pct)), "זמינות", "%")}
       ${perfChip(Number(p.shrink_pct), "פחת", "%")}</div>`;
 }
-function collapse(key, title, note, bodyHtml) {
+function collapse(key, title, bodyHtml) {
   const open = state._pdOpen && state._pdOpen.has(key);
-  return `<div class="collapse ${open ? "open" : ""}"><div class="col-head" data-collapse="${key}"><span class="chev">▸</span><h3>${title}</h3>${note ? `<span class="col-note">${note}</span>` : ""}</div>${open ? `<div class="col-body">${bodyHtml}</div>` : ""}</div>`;
+  return `<div class="collapse ${open ? "open" : ""}"><div class="col-head" data-collapse="${key}"><span class="chev">▸</span><h3>${title}</h3></div>${open ? `<div class="col-body">${bodyHtml}</div>` : ""}</div>`;
 }
 function telemetryZone(p, m, det) {
-  const panel = state._pdPanel;
-  const requested = (panel && panel.pid === p.promo_id && panel.kind === "request" && panel.requested != null) ? panel.requested : null;
-  const outcome = `<div id="outcome-host">${outcomeTable(p, m, requested)}</div>`;
   const mid = m.phase === "UPCOMING" ? `<div class="empty">הקמפיין טרם החל — נתוני ביצוע יופיעו כאן מהיום הראשון.</div>` : midCampaignBlock(p, m);
   const allocs = (det.allocations || []).slice(0, 600);
   state._promoDrillAllocs = allocs; state._promoDrillX = new Set();
-  return collapse("outcome", "תרחישי תוצאה — אישור מול התאמה", "השוואת שתי ההחלטות", outcome)
-    + collapse("hist", "השוואה היסטורית", "קצב אספקה מול חיזוי", historicalComparison(p, m))
-    + collapse("mid", "התקדמות הקמפיין", m.phase === "UPCOMING" ? "טרם החל" : "חיזוי מול בפועל", mid)
-    + collapse("store", `התפלגות סניפים (${num(p.store_count)} סניפים)`, "פירוט — לא קלט להחלטה", `<div id="promo-drill-tree">${renderDrillTree(allocs)}</div>`);
+  return collapse("outcome", "תרחישי תוצאה — הסכם מסחרי מול חיזוי מקורי", outcomeTable(p, m))
+    + collapse("hist", "השוואה היסטורית", historicalComparison(p, m))
+    + collapse("mid", "התקדמות הקמפיין", mid)
+    + collapse("store", `התפלגות סניפים (${num(p.store_count)})`, `<div id="promo-drill-tree">${renderDrillTree(allocs)}</div>`);
 }
 function drawPromoDetail(p, det, view) {
   const m = promoModel(p, det);
-  const dec = getDecision(p.promo_id), decStatus = promoDecisionStatus(p);
   const vName = LK.vendors[p.vendor_id] || p.vendor_id;
   const repCat = (det.allocations && det.allocations[0] && det.allocations[0].category_name)
     || (LK.items[p.representing_barcode] && LK.items[p.representing_barcode].dept_lv2_name) || "—";
   $("#pt").textContent = p.description || p.promo_id;
   $("#pc").textContent = p.promo_id + " · מבצעים";
   const header = `<div class="pd-header">
-    <span class="pd-back" data-route="promotions">← חזרה לרשימת המבצעים</span>
+    <span class="pd-back" data-route="promotions">← חזרה לרשימה</span>
     <h2><span dir="auto">${esc(p.description)}</span></h2>
-    <div class="pd-meta"><b>${esc(p.promo_id)}</b><span class="sep">·</span><span dir="auto">${esc(vName)}</span><span class="sep">·</span>${displayName(p.display_type_code)}<span class="sep">·</span>${ptypeName(p.promo_type_code)}<span class="sep">·</span><span dir="auto">${esc(repCat)}</span><span class="sep">·</span>${sdate(p.start_date)} → ${sdate(p.end_date)}<span class="sep">·</span><span dir="ltr">${p.catalog_price != null ? money(p.catalog_price) : "—"} → ${p.promo_price != null ? money(p.promo_price) : "—"}${p._disc != null ? " (" + p._disc + "% הנחה)" : ""}</span><span class="sep">·</span>${num(p.store_count)} סניפים<span class="sep">·</span>${lifecyclePill(p)}<span class="sep">·</span>${startsCell(p)}</div></div>`;
-  const trio = `<div class="trio">
-    ${trioCard("provider", "PROVIDER FORECAST", "חיזוי מקורי", m.provider, `מקור: ספק החיזוי · קצב אספקה היסטורי ${Math.round(m.deliveryRate * 100)}%`, false)}
-    ${trioCard("approved", "APPROVED FORECAST", "חיזוי מאושר (נוכחי)", m.approved, approvedSub(p), true)}
-    ${trioCard("agreement", "TRADE AGREEMENT", "הסכם מסחרי", m.agreement, `ספק: <span dir="auto">${esc(vName)}</span> · ${sdate(p.start_date)} → ${sdate(p.end_date)}`, false)}</div>`;
+    <div class="pd-meta"><b>${esc(p.promo_id)}</b><span class="sep">·</span><span dir="auto">${esc(vName)}</span><span class="sep">·</span>${displayName(p.display_type_code)}<span class="sep">·</span><span dir="auto">${esc(repCat)}</span><span class="sep">·</span>${sdate(p.start_date)} → ${sdate(p.end_date)}<span class="sep">·</span><span dir="ltr">${p.promo_price != null ? money(p.promo_price) : "—"}${p._disc != null ? " (" + p._disc + "% הנחה)" : ""}</span><span class="sep">·</span>${num(p.store_count)} סניפים<span class="sep">·</span>${lifecyclePill(p)}<span class="sep">·</span>${startsCell(p)}</div></div>`;
+  const duo = `<div class="duo">
+    ${trioCard("provider", "חיזוי מקורי", "ספק החיזוי (המכונה)", m.provider, `קצב אספקה היסטורי ${Math.round(m.deliveryRate * 100)}% · ביקוש צפוי ${num(m.expectedDemand)}`, false)}
+    ${trioCard("agreement", "הסכם מסחרי", "חיזוי מאושר — נקבע ונעל ע\"י מנהל השרשרת", m.value, decSub(p), true)}</div>`;
   view.innerHTML = header
-    + `<div class="pd-zone"><div class="pd-zone-title">אזור החלטה</div>${trio}${decisionRuler(m)}${decisionBar(p, m, decStatus, dec)}${renderDecisionPanel(p, m)}</div>`
+    + `<div class="pd-zone"><div class="pd-zone-title">אזור החלטה</div>${duo}${decisionRuler(m)}${decisionEdit(p, m)}</div>`
     + `<div class="pd-zone"><div class="pd-zone-title">בריאות ההחלטה</div>${healthZone(p, m)}</div>`
     + `<div class="pd-zone"><div class="pd-zone-title">טלמטריה ופירוט</div>${telemetryZone(p, m, det)}</div>`;
-  attachDetailHandlers(p, m, det, view);
+  attachDetailHandlers(p, det, view);
 }
-function attachDetailHandlers(p, m, det, view) {
+function attachDetailHandlers(p, det, view) {
   view.querySelectorAll("[data-route]").forEach((el) => el.addEventListener("click", () => navigate(el.dataset.route)));
   view.querySelectorAll("[data-collapse]").forEach((el) => el.addEventListener("click", () => {
     const k = el.dataset.collapse; state._pdOpen.has(k) ? state._pdOpen.delete(k) : state._pdOpen.add(k); drawPromoDetail(p, det, view);
   }));
-  view.querySelectorAll("[data-dir]").forEach((el) => el.addEventListener("click", () => { state._pdPanel.direction = el.dataset.dir; drawPromoDetail(p, det, view); }));
-  view.querySelectorAll("[data-act]").forEach((el) => el.addEventListener("click", () => handleDetailAct(el.dataset.act, p, m, det, view)));
-  const rq = view.querySelector("#req-qty");
-  if (rq) rq.addEventListener("input", () => {
-    const v = parseFloat(rq.value); state._pdPanel.requested = isNaN(v) ? null : v;
-    const host = view.querySelector("#outcome-host"); if (host) host.innerHTML = outcomeTable(p, m, isNaN(v) ? null : v);
+  view.querySelectorAll("[data-act]").forEach((el) => el.addEventListener("click", () => handleDetailAct(el.dataset.act, p, det, view)));
+  const tv = view.querySelector("#trade-val");
+  if (tv) tv.addEventListener("change", () => {
+    const q = parseFloat(tv.value); if (isNaN(q)) return;
+    const dec = getDecision(p.promo_id);
+    setDecision(p.promo_id, { value: q, locked: dec ? !!dec.locked : false, at: nowIso(), by: state.user || "admin" });
+    drawPromoDetail(p, det, view);
   });
 }
-function handleDetailAct(act, p, m, det, view) {
+function handleDetailAct(act, p, det, view) {
   const by = state.user || "admin";
-  if (act === "accept") {
-    if (!confirm(`לאשר את החיזוי המאושר הנוכחי (${num(m.approved)} יח') כהחלטה סופית למבצע?`)) return;
-    setDecision(p.promo_id, { status: "accepted", value: m.approved, at: nowIso(), by }); state._pdPanel = null;
-  } else if (act === "match") {
-    state._pdPanel = { pid: p.promo_id, kind: "match" };
-  } else if (act === "request") {
-    state._pdPanel = { pid: p.promo_id, kind: "request", direction: m.approved < m.agreement ? "down" : "up", requested: m.approved };
-    state._pdOpen.add("outcome");
-  } else if (act === "panel-cancel") {
-    state._pdPanel = null;
+  if (act === "lock") {
+    const q = parseFloat((view.querySelector("#trade-val") || {}).value);
+    if (isNaN(q)) { alert("נא להזין כמות תקינה"); return; }
+    setDecision(p.promo_id, { value: q, locked: true, at: nowIso(), by });
+  } else if (act === "unlock") {
+    const dec = getDecision(p.promo_id), v = dec && dec.value != null ? dec.value : Number(p.trade_agreement_qty || 0);
+    setDecision(p.promo_id, { value: v, locked: false, at: nowIso(), by });
   } else if (act === "reset") {
-    setDecision(p.promo_id, null); state._pdPanel = null;
-  } else if (act === "match-confirm") {
-    const q = parseFloat((view.querySelector("#match-qty") || {}).value);
-    const reason = (view.querySelector("#match-reason") || {}).value || "";
-    const note = (view.querySelector("#match-note") || {}).value || "";
-    if (isNaN(q)) { alert("נא להזין כמות יעד תקינה"); return; }
-    setDecision(p.promo_id, { status: "matched", value: q, reason: note ? reason + " — " + note : reason, at: nowIso(), by });
-    state._pdPanel = null;
-  } else if (act === "request-confirm") {
-    const q = parseFloat((view.querySelector("#req-qty") || {}).value);
-    const urg = (view.querySelector("#req-urg") || {}).value || "רגילה";
-    const msg = (view.querySelector("#req-msg") || {}).value || "";
-    const dir = (state._pdPanel && state._pdPanel.direction) || "down";
-    if (isNaN(q)) { alert("נא להזין כמות מבוקשת תקינה"); return; }
-    pushRevision({ promo_id: p.promo_id, description: p.description, vendor_id: p.vendor_id,
-      current_agreement: m.agreement, requested_qty: q, direction: dir, urgency: urg, message: msg, at: nowIso(), by });
-    setDecision(p.promo_id, { status: "change_requested", requested: q, direction: dir, urgency: urg, value: null, at: nowIso(), by });
-    state._pdPanel = null;
-    alert("הבקשה נשלחה למחלקת הסחר ונרשמה בתור הבקשות.");
+    setDecision(p.promo_id, null);
   }
   drawPromoDetail(p, det, view);
 }
 async function renderPromoDetailPage(pid, view) {
   if (!state._promo) { const d = await load("/api/promotions"); if (d) state._promo = d; }
-  state._decisions = loadDecisions(); state._revisions = loadRevisions();
-  state._pdPanel = null;
+  state._decisions = loadDecisions();
   const d = state._promo || {};
   const p0 = (d.promotions || []).find((x) => x.promo_id === pid);
   if (!p0) { view.innerHTML = `<div class="empty">מבצע ${esc(pid)} לא נמצא — <a class="linkish" data-route="promotions" style="cursor:pointer">חזרה לרשימה</a></div>`;
     view.querySelectorAll("[data-route]").forEach((el) => el.addEventListener("click", () => navigate(el.dataset.route))); return; }
   const p = { ...p0, _phase: promoPhase(p0), _days: promoDays(p0.start_date), _disc: promoDisc(p0) };
   state._pdOpen = new Set(p._phase === "UPCOMING" ? ["outcome", "hist"] : ["outcome", "hist", "mid"]);
-  view.innerHTML = `<div class="pd-header"><span class="pd-back" data-route="promotions">← חזרה לרשימת המבצעים</span><h2><span dir="auto">${esc(p.description)}</span></h2><div class="pd-meta">${esc(pid)} · טוען נתונים…</div></div>${spinner}`;
+  view.innerHTML = `<div class="pd-header"><span class="pd-back" data-route="promotions">← חזרה לרשימה</span><h2><span dir="auto">${esc(p.description)}</span></h2><div class="pd-meta">${esc(pid)} · טוען…</div></div>${spinner}`;
   const det = await promoDetail(pid);
   drawPromoDetail(p, det, view);
 }
