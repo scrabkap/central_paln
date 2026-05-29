@@ -1,0 +1,154 @@
+name: Deploy Central Planning POC
+
+# One-shot deploy: CloudFormation (DynamoDB + Lambda + CloudFront) -> package
+# Lambda -> upload SPA -> seed mock data -> invalidate CloudFront.
+on:
+  push:
+    branches: [main, claude/quirky-volta-KbEEw]
+    paths:
+      - infra/**
+      - lambda/**
+      - web/**
+      - seed/**
+      - tools/**
+      - dynamodb_tables.json
+      - .github/workflows/deploy.yml
+  workflow_dispatch:
+
+concurrency:
+  group: cp-poc-deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  STACK_NAME: central-planning-poc
+  ADMIN_USERNAME: admin
+  ADMIN_PASSWORD: Prodbug76
+  AUTH_SECRET: cp-poc-hmac-2026-9f3a2b71c4
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Configure AWS credentials
+        run: |
+          AKID="${{ secrets.AWS_ACCESS_KEY_ID }}"
+          SKEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}"
+          # tolerate the common alternative secret names
+          [ -z "$AKID" ] && AKID="${{ secrets.AWS_ACCESS_KEY }}"
+          [ -z "$SKEY" ] && SKEY="${{ secrets.AWS_SECRET_KEY }}"
+          if [ -z "$AKID" ] || [ -z "$SKEY" ]; then
+            echo "::error::Missing AWS credentials. Add repo secrets AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY."
+            exit 1
+          fi
+          aws configure set aws_access_key_id "$AKID"
+          aws configure set aws_secret_access_key "$SKEY"
+          aws configure set region "$AWS_REGION"
+          echo "AWS_DEFAULT_REGION=$AWS_REGION" >> "$GITHUB_ENV"
+          echo "Authenticated as:"
+          aws sts get-caller-identity
+
+      - name: Regenerate CloudFormation template
+        run: |
+          python -m pip install --quiet pyyaml
+          python tools/build_template.py
+
+      - name: Validate template
+        run: aws cloudformation validate-template --template-body file://infra/template.yaml >/dev/null
+
+      - name: Ensure artifact bucket
+        id: artifact
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          BUCKET="cp-poc-artifacts-${ACCOUNT_ID}-${AWS_REGION}"
+          if ! aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
+            if [ "$AWS_REGION" = "us-east-1" ]; then
+              aws s3api create-bucket --bucket "$BUCKET"
+            else
+              aws s3api create-bucket --bucket "$BUCKET" \
+                --create-bucket-configuration LocationConstraint="$AWS_REGION"
+            fi
+          fi
+          echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
+
+      - name: Package Lambda
+        id: pkg
+        run: |
+          cd lambda
+          zip -q -r ../lambda.zip handler.py
+          cd ..
+          KEY="lambda/${GITHUB_SHA}.zip"
+          aws s3 cp lambda.zip "s3://${{ steps.artifact.outputs.bucket }}/${KEY}"
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy CloudFormation stack
+        run: |
+          aws cloudformation deploy \
+            --stack-name "$STACK_NAME" \
+            --template-file infra/template.yaml \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              LambdaS3Bucket="${{ steps.artifact.outputs.bucket }}" \
+              LambdaS3Key="${{ steps.pkg.outputs.key }}" \
+              AdminUsername="$ADMIN_USERNAME" \
+              AdminPassword="$ADMIN_PASSWORD" \
+              AuthSecret="$AUTH_SECRET"
+
+      - name: Read stack outputs
+        id: out
+        run: |
+          get() { aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text; }
+          echo "web_bucket=$(get WebBucketName)" >> "$GITHUB_OUTPUT"
+          echo "dist_id=$(get DistributionId)" >> "$GITHUB_OUTPUT"
+          echo "url=$(get CloudFrontURL)" >> "$GITHUB_OUTPUT"
+
+      - name: Refresh Lambda code
+        run: |
+          aws lambda update-function-code \
+            --function-name "cp-poc-api-${STACK_NAME}" \
+            --s3-bucket "${{ steps.artifact.outputs.bucket }}" \
+            --s3-key "${{ steps.pkg.outputs.key }}" >/dev/null
+          aws lambda wait function-updated \
+            --function-name "cp-poc-api-${STACK_NAME}"
+
+      - name: Upload SPA to S3
+        run: |
+          aws s3 sync web/ "s3://${{ steps.out.outputs.web_bucket }}/" --delete
+          aws s3 cp web/index.html "s3://${{ steps.out.outputs.web_bucket }}/index.html" \
+            --cache-control "no-cache" --content-type "text/html"
+
+      - name: Seed mock data into DynamoDB
+        run: |
+          python -m pip install --quiet boto3
+          python seed/seed.py
+
+      - name: Invalidate CloudFront cache
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "${{ steps.out.outputs.dist_id }}" \
+            --paths "/*" >/dev/null
+
+      - name: Summary
+        run: |
+          {
+            echo "## Central Planning POC deployed"
+            echo ""
+            echo "**Dashboard:** ${{ steps.out.outputs.url }}"
+            echo ""
+            echo "- Login: \`admin\` / \`Prodbug76\`"
+            echo "- Stack: \`$STACK_NAME\` (region \`$AWS_REGION\`)"
+            echo "- CloudFront may take a few minutes to finish propagating on first deploy."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Dashboard URL: ${{ steps.out.outputs.url }}"

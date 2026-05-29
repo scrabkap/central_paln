@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+*.zip
+.aws-sam/
+.DS_Store
