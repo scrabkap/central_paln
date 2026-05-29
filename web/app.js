@@ -194,7 +194,7 @@ function kv(pairs) {
 }
 
 function openModal(title, sub, bodyHTML) {
-  $("#modal-root").innerHTML = `<div class="modal-back" data-close>
+  $("#modal-root").innerHTML = `<div class="modal-back">
     <div class="modal">
       <div class="modal-head">
         <div><h3>${title}</h3>${sub ? `<div class="m-sub">${sub}</div>` : ""}</div>
@@ -442,16 +442,32 @@ function promoPhaseBadge(p) {
   return `<span class="badge gray">הסתיים</span>`;
 }
 const PROMO_BUCKETS = [
-  ["next2w", "2 שבועות הקרובים"], ["upcoming", "עתידיים"],
-  ["ongoing", "פעילים"], ["completed", "הסתיימו"], ["all", "הכל"],
+  ["next2w", "2 שבועות הקרובים"], ["ongoing", "פעילים"],
+  ["completed", "הסתיימו"], ["all", "הכל"],
 ];
+const PTYPE_HE = { Y001: "מחיר קבוע", Y003: "אחוז הנחה", Y004: "הנחה כספית", Y007: "מתנה", Y009: "נקודות מועדון", Y010: "מדיה", Y011: "כפולה" };
+const LOYALTY_HE = { "000": "כל הלקוחות", "001": "חברי מועדון", "002": "זהב", "003": "פלטינום" };
+const ptypeName = (c) => c ? (PTYPE_HE[c] || c) : "—";
+function resolvePf(key, text) {
+  text = (text || "").trim();
+  if (!text) return "";
+  const opts = (state._promoOpts && state._promoOpts[key]) || [];
+  let o = opts.find((x) => x.text === text);
+  if (o) return o.value;
+  o = opts.find((x) => String(x.value).toLowerCase() === text.toLowerCase());
+  if (o) return o.value;
+  const t = text.toLowerCase();
+  o = opts.find((x) => x.text.toLowerCase().includes(t) || String(x.value).toLowerCase().includes(t));
+  return o ? o.value : "";
+}
 
 PAGES.promotions = async () => {
   const d = await load("/api/promotions");
   if (!d) return `<div class="empty">אין נתונים</div>`;
   state._promo = d;
-  state._promoF = { bucket: "next2w", format: "", display: "", vendor: "", ptype: "", wh: "" };
+  state._promoF = { bucket: "next2w", format: "", display: "", vendor: "", category: "", ptype: "", wh: "" };
   state._promoX = new Set();
+  state._promoOpts = {};
   state._approvedOverride = {};
   return `<div id="promo-root"></div>`;
 };
@@ -460,7 +476,7 @@ PAGES.promotions.after = () => {
   if (!root) return;
   root.addEventListener("change", (e) => {
     const el = e.target.closest("[data-pf]");
-    if (el) { state._promoF[el.dataset.pf] = el.value; renderPromo(); }
+    if (el) { state._promoF[el.dataset.pf] = resolvePf(el.dataset.pf, el.value); renderPromo(); }
   });
   root.addEventListener("click", (e) => {
     const b = e.target.closest("[data-bucket]");
@@ -480,20 +496,21 @@ function promoScope() {
   const pmap = {}; promos.forEach((p) => { pmap[p.promo_id] = p; });
   const inBucket = (p) => F.bucket === "all" ? true
     : F.bucket === "next2w" ? (p._phase === "UPCOMING" && p._days <= 14)
-    : F.bucket === "upcoming" ? p._phase === "UPCOMING"
     : F.bucket === "ongoing" ? p._phase === "ONGOING"
     : p._phase === "COMPLETED";
-  const dimOk = (a, p) => (!F.format || a.format_code === F.format)
+  const dimOk = (a) => (!F.format || a.format_code === F.format)
     && (!F.display || a.display_type_code === F.display)
     && (!F.vendor || a.vendor_id === F.vendor)
+    && (!F.category || a.category_code === F.category)
     && (!F.ptype || a.promo_type_code === F.ptype)
     && (!F.wh || (a.managing_warehouse_id || "") === F.wh);
-  const allocs = (d.allocations || []).filter((a) => { const p = pmap[a.promo_id]; return p && inBucket(p) && dimOk(a, p); });
+  const allocs = (d.allocations || []).filter((a) => { const p = pmap[a.promo_id]; return p && inBucket(p) && dimOk(a); });
+  const whCat = (w) => { const it = LK.items[w.item_barcode]; return it ? it.dept_lv2_code : null; };
   const whsup = (d.wh_supply || []).filter((w) => {
     const p = pmap[w.promo_id]; if (!p || !inBucket(p)) return false;
     return (!F.format || p.format_code === F.format) && (!F.display || p.display_type_code === F.display)
-      && (!F.vendor || w.vendor_id === F.vendor) && (!F.ptype || p.promo_type_code === F.ptype)
-      && (!F.wh || (w.warehouse_id || "") === F.wh);
+      && (!F.vendor || w.vendor_id === F.vendor) && (!F.category || whCat(w) === F.category)
+      && (!F.ptype || p.promo_type_code === F.ptype) && (!F.wh || (w.warehouse_id || "") === F.wh);
   });
   const ids = new Set(allocs.map((a) => a.promo_id));
   return { promos, pmap, allocs, whsup, scoped: promos.filter((p) => ids.has(p.promo_id)) };
@@ -512,8 +529,12 @@ function buildPromoTree(allocs, pmap) {
       const vnode = { id: fnode.id + "|V#" + vcode, depth: 1, kind: "vendor", open: "ven:" + fcode + "|" + vcode, label: LK.vendors[vcode] || vcode, allocs: va, pmap, children: [] };
       for (const [dcode, da] of groupMap(va, (a) => a.display_type_code)) {
         const dnode = { id: vnode.id + "|D#" + dcode, depth: 2, kind: "display", open: "disp:" + fcode + "|" + vcode + "|" + dcode, label: displayName(dcode), allocs: da, pmap, children: [] };
-        for (const [pid, pa] of groupMap(da, (a) => a.promo_id)) {
-          dnode.children.push({ id: "P#" + pid + "@" + vnode.id, depth: 3, kind: "promo", open: "promo:" + pid, promo: pmap[pid], label: pmap[pid] ? pmap[pid].description : pid, allocs: pa, pmap });
+        for (const [ccode, ca] of groupMap(da, (a) => a.category_code)) {
+          const cnode = { id: dnode.id + "|C#" + ccode, depth: 3, kind: "category", open: "cat:" + fcode + "|" + vcode + "|" + dcode + "|" + ccode, label: (ca[0] && ca[0].category_name) || ccode, allocs: ca, pmap, children: [] };
+          for (const [pid, pa] of groupMap(ca, (a) => a.promo_id)) {
+            cnode.children.push({ id: "P#" + pid + "@" + cnode.id, depth: 4, kind: "promo", open: "promo:" + pid, promo: pmap[pid], label: pmap[pid] ? pmap[pid].description : pid, allocs: pa, pmap });
+          }
+          dnode.children.push(cnode);
         }
         vnode.children.push(dnode);
       }
@@ -619,11 +640,18 @@ function openAggPopup(spec) {
     nw = whsup.filter((w) => w.vendor_id === v && pmap[w.promo_id] && pmap[w.promo_id].format_code === f);
     title = "ספק · " + (LK.vendors[v] || v) + " · " + formatName(f);
     breakdown = aggBreakdown(na, pmap, (a) => a.display_type_code, (dd) => displayName(dd), (dd) => "disp:" + f + "|" + v + "|" + dd, "אמצעי תצוגה");
-  } else {
+  } else if (kind === "disp") {
     const [f, v, dd] = arg.split("|");
     na = allocs.filter((a) => a.format_code === f && a.vendor_id === v && a.display_type_code === dd);
     nw = whsup.filter((w) => { const p = pmap[w.promo_id]; return p && p.format_code === f && p.display_type_code === dd && w.vendor_id === v; });
     title = displayName(dd) + " · " + (LK.vendors[v] || v) + " · " + formatName(f);
+    breakdown = aggBreakdown(na, pmap, (a) => a.category_code, (cc) => (na.find((x) => x.category_code === cc) || {}).category_name || cc, (cc) => "cat:" + f + "|" + v + "|" + dd + "|" + cc, "היררכיית פריט");
+  } else {
+    const [f, v, dd, cc] = arg.split("|");
+    na = allocs.filter((a) => a.format_code === f && a.vendor_id === v && a.display_type_code === dd && a.category_code === cc);
+    nw = whsup.filter((w) => { const p = pmap[w.promo_id], it = LK.items[w.item_barcode]; return p && p.format_code === f && p.display_type_code === dd && w.vendor_id === v && it && it.dept_lv2_code === cc; });
+    const cname = (na[0] && na[0].category_name) || cc;
+    title = cname + " · " + displayName(dd) + " · " + (LK.vendors[v] || v);
     breakdown = aggBreakdown(na, pmap, (a) => a.promo_id, (pid) => pmap[pid] ? pmap[pid].description : pid, (pid) => "promo:" + pid, "מבצעים");
   }
   const override = fmt != null ? state._approvedOverride[fmt] : null;
@@ -666,7 +694,21 @@ function renderPromo() {
 
   const regAll = (d.allocations || []).filter((a) => { const p = pmap[a.promo_id] || (d.promotions || []).find((x) => x.promo_id === a.promo_id); return p && (p.activity_type === "REGULAR_UNIVERSE" || pmap[a.promo_id]); });
   const uniq = (arr) => [...new Set(arr)].filter((x) => x != null && x !== "");
-  const sel = (key, label, opts, fmtFn) => `<select class="select" data-pf="${key}"><option value="">${label}</option>${opts.map((o) => `<option value="${esc(o)}" ${F[key] === o ? "selected" : ""}>${esc(fmtFn ? fmtFn(o) : o)}</option>`).join("")}</select>`;
+  const catName = {}; regAll.forEach((a) => { if (a.category_code) catName[a.category_code] = a.category_name; });
+  state._promoOpts = {
+    format: uniq(regAll.map((a) => a.format_code)).map((v) => ({ value: v, text: formatName(v) + " · " + v })),
+    vendor: uniq(regAll.map((a) => a.vendor_id)).map((v) => ({ value: v, text: (LK.vendors[v] || v) + " · " + v })),
+    display: uniq(regAll.map((a) => a.display_type_code)).map((v) => ({ value: v, text: displayName(v) + " · " + v })),
+    category: uniq(regAll.map((a) => a.category_code)).map((v) => ({ value: v, text: (catName[v] || v) + " · " + v })),
+    ptype: uniq(regAll.map((a) => a.promo_type_code)).map((v) => ({ value: v, text: ptypeName(v) + " · " + v })),
+    wh: uniq(regAll.map((a) => a.managing_warehouse_id)).map((v) => ({ value: v, text: "מחסן " + v })),
+  };
+  const combo = (key, ph) => {
+    const opts = state._promoOpts[key] || [];
+    const curOpt = opts.find((o) => o.value === F[key]);
+    return `<input class="search" style="min-width:180px" list="dl-${key}" data-pf="${key}" placeholder="${esc(ph)}" value="${esc(curOpt ? curOpt.text : "")}" autocomplete="off" />
+      <datalist id="dl-${key}">${opts.map((o) => `<option value="${esc(o.text)}"></option>`).join("")}</datalist>`;
+  };
   const buckets = PROMO_BUCKETS.map(([k, lbl]) => `<button class="btn ${F.bucket === k ? "btn-primary" : "btn-ghost"}" data-bucket="${k}" style="width:auto">${lbl}</button>`).join("");
 
   let apprT = 0;
@@ -696,18 +738,19 @@ function renderPromo() {
 
   const tree = buildPromoTree(allocs, pmap);
   const treeRows = tree.map(renderPromoNode).join("");
-  const header = `<tr><th>פורמט → ספק → אמצעי תצוגה → מבצע</th><th class="num">סניפים</th><th class="num">חיזוי מקורי</th><th class="num">חיזוי מאושר</th><th class="num">הוזמן</th><th class="num">נמכר</th><th class="num">איכות חיזוי</th><th class="num">אימוץ</th><th class="num">הסכם מסחרי</th><th>התראה</th></tr>`;
-  const banner = F.bucket === "next2w" ? `<div class="card" style="border-color:${atRisk ? "var(--bad)" : "var(--border)"};margin-bottom:16px"><div style="display:flex;gap:24px;align-items:center;flex-wrap:wrap"><div><div class="c-val" style="font-size:26px">${scoped.length}</div><div class="c-lbl">מבצעים ב-14 הימים הקרובים — לטיפול מיידי</div></div>${atRisk ? `<div style="color:#fca5a5"><div class="c-val" style="font-size:26px">${atRisk}</div><div class="c-lbl">⚠ חלשים מול הסכם מסחרי</div></div>` : ""}<div class="mut" style="flex:1;text-align:end;min-width:200px">אגרגציה: פורמט → ספק → אמצעי תצוגה → מבצע · לחיצה על כל רמה לפירוט ומדדים</div></div></div>` : "";
+  const header = `<tr><th>פורמט → ספק → אמצעי תצוגה → היררכיה → מבצע</th><th class="num">סניפים</th><th class="num">חיזוי מקורי</th><th class="num">חיזוי מאושר</th><th class="num">הוזמן</th><th class="num">נמכר</th><th class="num">איכות חיזוי</th><th class="num">אימוץ</th><th class="num">הסכם מסחרי</th><th>התראה</th></tr>`;
+  const banner = F.bucket === "next2w" ? `<div class="card" style="border-color:${atRisk ? "var(--bad)" : "var(--border)"};margin-bottom:16px"><div style="display:flex;gap:24px;align-items:center;flex-wrap:wrap"><div><div class="c-val" style="font-size:26px">${scoped.length}</div><div class="c-lbl">מבצעים ב-14 הימים הקרובים — לטיפול מיידי</div></div>${atRisk ? `<div style="color:#fca5a5"><div class="c-val" style="font-size:26px">${atRisk}</div><div class="c-lbl">⚠ חלשים מול הסכם מסחרי</div></div>` : ""}<div class="mut" style="flex:1;text-align:end;min-width:200px">אגרגציה: פורמט → ספק → אמצעי תצוגה → היררכיה → מבצע · לחיצה על כל רמה לפירוט ומדדים</div></div></div>` : "";
 
   root.innerHTML = `
     <div class="card-sub" style="margin-bottom:14px">פעילות שוטפת (יוניברס) — תכנון תפעולי end-to-end: חיזוי מקורי מול מאושר, הזמנה מול המלצה (אימוץ), מכר מול חיזוי, והסכם מסחרי מול חוזק המבצע.</div>
     <div class="filters">${buckets}</div>
     <div class="filters">
-      ${sel("format", "כל הפורמטים", uniq(regAll.map((a) => a.format_code)), formatName)}
-      ${sel("display", "כל אמצעי התצוגה", uniq(regAll.map((a) => a.display_type_code)), displayName)}
-      ${sel("vendor", "כל הספקים", uniq(regAll.map((a) => a.vendor_id)), (v) => LK.vendors[v] || v)}
-      ${sel("ptype", "כל סוגי המבצע", uniq(regAll.map((a) => a.promo_type_code)))}
-      ${sel("wh", "כל המחסנים", uniq(regAll.map((a) => a.managing_warehouse_id)), (w) => "מחסן " + w)}
+      ${combo("format", "פורמט — הקלד קוד/תיאור")}
+      ${combo("vendor", "ספק — הקלד קוד/שם")}
+      ${combo("display", "אמצעי תצוגה — קוד/תיאור")}
+      ${combo("category", "היררכיית פריט")}
+      ${combo("ptype", "סוג מבצע")}
+      ${combo("wh", "מחסן מנהל")}
     </div>
     ${banner}${kpis}
     <div class="section table-wrap"><table class="data"><thead>${header}</thead><tbody>${treeRows || `<tr><td colspan="10"><div class="empty">אין מבצעים בהיקף הנבחר</div></td></tr>`}</tbody></table></div>`;
@@ -959,10 +1002,13 @@ const DRILL = {
     const weak = trade > 0 && appr < trade;
     const maxF = Math.max(orig, appr, trade, ord, sold, 1);
     const bar = (label, val, color) => `<div style="margin:7px 0"><div style="display:flex;justify-content:space-between;font-size:12px"><span>${label}</span><span class="strong">${num(val)}</span></div><div class="bar" style="height:10px"><i style="width:${Math.round(val / maxF * 100)}%;background:${color}"></i></div></div>`;
+    const repCat = (allocs[0] && allocs[0].category_name) || (LK.items[p.representing_barcode] && LK.items[p.representing_barcode].dept_lv2_name) || "—";
     let body = kv([
       ["סוג פעילות", badge(p.activity_type)], ["שלב", promoPhaseBadge(p)],
       ["פורמט", formatName(p.format_code)], ["אמצעי תצוגה", displayName(p.display_type_code)],
-      ["סוג מבצע", p.promo_type_code || "—"], ["ספק", LK.vendors[p.vendor_id] || p.vendor_id],
+      ["סוג מבצע", ptypeName(p.promo_type_code)], ["ספק", LK.vendors[p.vendor_id] || p.vendor_id],
+      ["מועדון / קהל", LOYALTY_HE[p.loyalty_segment_code] || p.loyalty_segment_code || "—"],
+      ["היררכיית פריט", `<span dir="auto">${esc(repCat)}</span>`],
       ["מחסן מנהל", p.managing_warehouse_id ? "מחסן " + p.managing_warehouse_id : "ישיר"],
       ["מחיר קטלוגי", p.catalog_price != null ? money(p.catalog_price) : "—"],
       ["מחיר מבצע", p.promo_price != null ? money(p.promo_price) : badge("WAITING_QC", "טרם נקבע")],
@@ -1194,6 +1240,7 @@ function logout() {
 
 /* ---------------- global events ---------------- */
 document.addEventListener("click", (e) => {
+  if (e.target.classList && e.target.classList.contains("modal-back")) { closeModal(); return; }
   const close = e.target.closest("[data-close]");
   if (close) { closeModal(); return; }
   const d = e.target.closest("[data-drill]");

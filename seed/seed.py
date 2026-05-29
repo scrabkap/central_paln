@@ -75,19 +75,46 @@ VENDORS = [
 ]
 
 DISPLAY_TYPES = [
-    ("Z137", "גונדולה משתנה", "Variable gondola", False),
     ("Z000", "עיתון", "Newspaper display", False),
+    ("Z137", "גונדולה משתנה", "Variable gondola", False),
+    ("Z138", "מקררים", "Refrigerators", False),
+    ("Z141", "סטנדים", "Stands", False),
+    ("Z142", "סטנדים מרכז", "Stands (variant 2)", False),
+    ("Z143", "סטנדים כניסה", "Stands (variant 3)", False),
+    ("Z144", "במות", "Stages / platforms", False),
+    ("Z160", "מיתחם", "Area / zone", False),
+    ("Z166", "מקרר סלטים ארוזים-מדף", "Packaged salads fridge", False),
     ("Z169", "מעדניה חלבית", "Dairy deli", False),
     ("Z170", "מבצעי מדף", "Shelf promotions", False),
-    ("Z190", "משטחונים", "Pallets / floor displays", False),
-    ("Z240", "מבצע שבועי מתחלף", "Rotating weekly promotion", False),
-    ("Z141", "סטנדים", "Stands", False),
-    ("Z138", "מקררים", "Refrigerators", False),
+    ("Z171", "מבצעי מעדניה מדף", "Deli shelf promotions", False),
+    ("Z173", "ראשי גונדולה מקפיאים", "Freezer gondola ends", False),
     ("Z174", "מקרר גלידות", "Ice cream freezer", False),
+    ("Z185", "ראשי גונדולה-ניקיון", "Cleaning gondola ends", False),
     ("Z186", "ראשי גונדולה מזון", "Food gondola ends", False),
+    ("Z188", "ראשי גונדולה פארם", "Pharma gondola ends", False),
+    ("Z189", "ראשי גונדולה מועדון", "Club gondola ends", False),
+    ("Z190", "משטחונים", "Pallets / floor displays", False),
     ("Z193", "מקפיאים מדף", "Freezer shelf", False),
+    ("Z206", "קופונים בשר וקפואים", "Meat & frozen coupons", False),
+    ("Z209", "קופונים חברי מועדון", "Club member coupons", False),
     ("Z210", "מתחם מבצעים חמים", "Hot promotions zone", False),
+    ("Z219", "ראש גונדולה מקנזי", "McKenzie gondola end", False),
     ("Z221", "מוצרים בכניסה 50% הנחה", "Store entrance 50% off", False),
+    ("Z225", "אמבטיה סוללות", "Battery bath", False),
+    ("Z226", "סטריפים", "Strips", False),
+    ("Z230", "עגלות בכניסה לחנות", "Entry carts", False),
+    ("Z231", "עגלות בכניסה מרכז", "Entry carts (variant 2)", False),
+    ("Z232", "ראשי גונדולה כרטיס אשראי", "Credit card gondola ends", False),
+    ("Z238", "שדה מוצרים בהשקה", "Product launch area", False),
+    ("Z239", "מיוחדים", "Specials", False),
+    ("Z240", "מבצע שבועי מתחלף", "Rotating weekly promotion", False),
+    ("Z241", "מעטפת חג", "Holiday wrap", False),
+    ("Z245", "מצוננים", "Chilled", False),
+    ("Z246", "מעדניה חלבית 2", "Dairy deli (variant 2)", False),
+    ("Z251", "דאמפים", "Dumps / end-of-aisle bins", False),
+    ("Z252", "ר\"ג בית מרקחת", "Pharmacy gondola end", False),
+    ("Z301", "דופן צד", "Side panel", False),
+    ("Z302", "ר\"ג קוסמטיקה", "Cosmetics gondola end", False),
     ("ZASO", "מגוון כללי", "General assortment", True),
     ("ZPLA", "מגוון פלנוגרמה", "Planogram assortment", True),
     ("ZPRO", "מגוון מבצעים", "Promotions assortment", True),
@@ -140,7 +167,7 @@ ITEMS = [
 
 ITEM_BY_BARCODE = {it[0]: it for it in ITEMS}
 
-STORES = [
+_ORIG_STORES = [
     ("0801", "יוניברס דיזנגוף סנטר", "8", "XL", 1.00),
     ("0802", "יוניברס רמת אביב", "8", "L", 0.86),
     ("0803", "יוניברס חיפה גרנד קניון", "8", "L", 0.81),
@@ -154,6 +181,35 @@ STORES = [
     ("0501", "פארם הרצליה", "5", "S", 0.44),
     ("0402", "דיל פתח תקווה", "4", "L", 0.78),
 ]
+_CITIES = [
+    "תל אביב", "ירושלים", "חיפה", "ראשון לציון", "פתח תקווה", "אשדוד", "נתניה",
+    "באר שבע", "חולון", "בני ברק", "רמת גן", "אשקלון", "רחובות", "הרצליה",
+    "כפר סבא", "חדרה", "מודיעין", "רעננה", "רמלה", "לוד", "נהריה", "קריית גת",
+    "עפולה", "אילת", "טבריה", "נצרת עילית", "עכו", "דימונה", "כרמיאל", "יבנה",
+    "קריית אתא", "אור יהודה", "ראש העין", "גבעתיים", "בת ים", "הוד השרון",
+]
+_FMT_NAME = {c: dsc for c, dsc in FORMATS}
+
+
+def _gen_stores(total=400):
+    rng = random.Random(404)
+    out = list(_ORIG_STORES)
+    codes = [c for c, _ in FORMATS]
+    per = (total - len(out)) // len(codes) + 1
+    for fc in codes:
+        for i in range(per):
+            if len(out) >= total:
+                break
+            sid = f"{fc}{100 + i:03d}"
+            city = rng.choice(_CITIES)
+            size = rng.choices(["S", "M", "L", "XL"], weights=[3, 4, 2, 1])[0]
+            out.append((sid, f"{_FMT_NAME.get(fc, fc)} {city} {i + 1}", fc,
+                        size, round(rng.uniform(0.35, 1.0), 2)))
+    return out[:total]
+
+
+STORES = _gen_stores(400)
+
 
 WH_ITEMS = {
     "6000": ["72838191199", "7290000110011", "7290000220017", "7290000220024",
@@ -263,7 +319,7 @@ def build_assortment():
 
 
 def build_planogram():
-    for sid, *_ in STORES:
+    for sid, *_ in STORES[:20]:
         for (bc, *_rest) in ITEMS[:14]:
             put("store_planogram", {
                 "PK": f"STORE#{sid}", "SK": f"ITEM#{bc}",
@@ -311,8 +367,8 @@ def build_stock():
             otw = random.choice([0, 0, 120, 240, 480])
             if otw:
                 put("stock_on_the_way", otw_row("WAREHOUSE", wh, bc, otw))
-    # stores
-    for sid, *_ in STORES:
+    # stores (sample — full 400-store stock isn't needed for the POC)
+    for sid, *_ in STORES[:20]:
         for (bc, *_rest) in ITEMS[:18]:
             on_hand = random.randint(0, 60)
             put("location_stock", stock_row("STORE", sid, bc, on_hand))
@@ -527,8 +583,8 @@ def build_forecast():
 # promotions (regular + ACES)
 # --------------------------------------------------------------------------
 def build_promotions():
-    plan = (["COMPLETED"] * 4 + ["ONGOING"] * 3
-            + ["UPCOMING_SOON"] * 7 + ["UPCOMING_LATER"] * 3)
+    plan = (["COMPLETED"] * 18 + ["ONGOING"] * 12
+            + ["UPCOMING_SOON"] * 22 + ["UPCOMING_LATER"] * 8)
     reps = [it for it in ITEMS if not (it[4] and it[4] != it[0])]
     for idx, phase in enumerate(plan):
         rep = reps[idx % len(reps)]
@@ -577,9 +633,13 @@ PROMO_TYPES = [
     ("Y007", "מתנה"), ("Y010", "מדיה"), ("Y011", "כפולה"),
 ]
 PROMO_TYPE_HE = dict(PROMO_TYPES)
-PROMO_DISPLAY_CODES = ["Z137", "Z169", "Z170", "Z190", "Z240",
-                       "Z186", "Z193", "Z210", "Z000", "Z221"]
-PROMO_FORMATS = ["8", "2", "7", "6", "4", "8", "2"]
+PROMO_DISPLAY_CODES = [
+    "Z000", "Z137", "Z138", "Z141", "Z142", "Z144", "Z160", "Z166", "Z169",
+    "Z170", "Z171", "Z173", "Z174", "Z185", "Z186", "Z188", "Z189", "Z190",
+    "Z193", "Z206", "Z209", "Z210", "Z219", "Z221", "Z226", "Z230", "Z232",
+    "Z238", "Z239", "Z240", "Z241", "Z245", "Z251", "Z301", "Z302",
+]
+PROMO_FORMATS = ["8", "2", "7", "6", "4", "5"]
 
 
 def _promo_dates(phase, i):
@@ -596,9 +656,10 @@ def _promo_dates(phase, i):
     return s, s + dt.timedelta(days=14)
 
 
-def _stores_for_format(fmt, k=6):
-    pool = [s for s in STORES if s[2] == fmt] or STORES[:k]
-    return pool[:k]
+def _stores_for_format(fmt):
+    pool = [s for s in STORES if s[2] == fmt] or STORES[:30]
+    k = min(len(pool), random.randint(18, 45))
+    return random.sample(pool, k)
 
 
 def _promo_status(phase):
@@ -634,11 +695,13 @@ def _alloc_block(pid, fmt, disp, ptype, members, stores, phase, start):
             agg["recom"] += recom
             agg["stores"].add(sid)
             per_item_recom[mbc] = per_item_recom.get(mbc, 0) + recom
+            dept = info[7]
             put("promotions", {
                 "PK": f"PROMO#{pid}", "SK": f"ALLOC#STORE#{sid}#ITEM#{mbc}",
                 "promo_id": pid, "store_id": sid, "store_name": sname,
                 "format_code": fmt, "display_type_code": disp,
                 "item_barcode": mbc, "item_desc": info[1],
+                "category_code": dept[0], "category_name": dept[1],
                 "vendor_id": mven, "supply_method": msupply,
                 "managing_warehouse_id": mwh, "promo_type_code": ptype,
                 "phase": phase,
