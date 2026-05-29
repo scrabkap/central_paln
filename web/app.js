@@ -1176,7 +1176,7 @@ function outcomeTable(p, m) {
   const cols = [["col-match", "הסכם מסחרי (נבחר)", candidateCost(p, m, m.value)],
     ["col-request", "חיזוי מקורי", candidateCost(p, m, m.provider)]];
   const row = (label, fn) => `<tr><td>${label}</td>${cols.map((c) => `<td>${fn(c[2])}</td>`).join("")}</tr>`;
-  return `<table class="outcome"><thead><tr><th></th>${cols.map((c) => `<th class="${c[0]}">${c[1]}<div style="font-size:11px;font-weight:600;opacity:.85" dir="ltr">${num(c[2].qty)}</div></th>`).join("")}</tr></thead><tbody>
+  return `<table class="outcome"><thead><tr><th></th>${cols.map((c) => `<th class="${c[0]}">${c[1]}<div style="font-size:11px;font-weight:600;opacity:.85"><span dir="ltr">${num(c[2].qty)}</span></div></th>`).join("")}</tr></thead><tbody>
     ${row("מכר צפוי", (c) => num(c.expectedSales))}
     ${row("הכנסה צפויה (לאחר הנחה)", (c) => money(c.revenue))}
     ${row("עלות עודף מלאי", (c) => money(c.excessCost))}
@@ -1317,12 +1317,20 @@ async function renderPromoDetailPage(pid, view) {
    forecast between four strength levels.
    ============================================================ */
 const ACE_STR = [
-  { cls: "MEDIUM", label: "בינוני", mult: 0.7 },
-  { cls: "STRONG", label: "חזק", mult: 1.0 },
-  { cls: "DEEP", label: "עמוק", mult: 1.25 },
-  { cls: "VERY_DEEP", label: "עמוק מאוד", mult: 1.6 },
+  { cls: "MEDIUM", label: "בינוני", mult: 0.7, disc: 0 },
+  { cls: "STRONG", label: "חזק", mult: 1.0, disc: 0.25 },
+  { cls: "DEEP", label: "עמוק", mult: 1.25, disc: 0.5 },
+  { cls: "VERY_DEEP", label: "עמוק מאוד", mult: 1.6, disc: 0.8 },
 ];
-const ACE_MAX_DISCOUNT = 0.5;
+const ACE_MAX_DISCOUNT = 0.8;
+function aceMultForDisc(disc) {
+  const p = ACE_STR;
+  if (disc <= p[0].disc) return p[0].mult;
+  for (let i = 1; i < p.length; i++) {
+    if (disc <= p[i].disc) { const a = p[i - 1], b = p[i], t = (disc - a.disc) / (b.disc - a.disc); return a.mult + t * (b.mult - a.mult); }
+  }
+  return p[p.length - 1].mult;
+}
 const ACE_STATUS_HE = { draft: "טיוטה", locked: "נעול לתכנון", linked: "מקושר למבצע" };
 function loadAces() { try { return JSON.parse(localStorage.getItem("cp_aces") || "[]"); } catch (e) { return []; } }
 function saveAces() { localStorage.setItem("cp_aces", JSON.stringify(state._aces || [])); }
@@ -1349,7 +1357,8 @@ function aceBaseQty(a) {
   const per = 70 + 260 * hashFrac("ace#" + key + "#" + (a.display_type_code || ""));
   return Math.round(formatStoreCount(a.format_code) * per / 10) * 10;
 }
-// price <-> strength: catalog price => MEDIUM (×0.7); deepest discount => VERY_DEEP (×1.6)
+// price -> discount -> strength multiplier (piecewise across the four levels:
+// בינוני 0% · חזק 25% · עמוק 50% · עמוק מאוד 80%)
 function aceCompute(a) {
   const bc = a.item_barcode || (a.group_code ? groupLeader(a.group_code) : "");
   const catalog = itemCatalogPrice(bc);
@@ -1357,13 +1366,65 @@ function aceCompute(a) {
   let price = a.price != null && a.price !== "" ? Number(a.price) : catalog;
   if (catalog > 0) price = Math.max(minPrice, Math.min(catalog, price));
   const disc = catalog > 0 ? (catalog - price) / catalog : 0;
-  const t = Math.max(0, Math.min(1, disc / ACE_MAX_DISCOUNT));
-  const mult = 0.7 + t * 0.9;
+  const mult = aceMultForDisc(disc);
   const base = aceBaseQty(a);
-  const strengths = ACE_STR.map((s) => ({ ...s, price: Math.round(catalog * (1 - ((s.mult - 0.7) / 0.9) * ACE_MAX_DISCOUNT) * 10) / 10, qty: Math.round(base * s.mult) }));
+  const strengths = ACE_STR.map((s) => ({ ...s, price: Math.round(catalog * (1 - s.disc) * 10) / 10, qty: Math.round(base * s.mult) }));
   let current = strengths[0];
-  strengths.forEach((s) => { if (Math.abs(s.mult - mult) < Math.abs(current.mult - mult)) current = s; });
+  strengths.forEach((s) => { if (Math.abs(s.disc - disc) < Math.abs(current.disc - disc)) current = s; });
   return { catalog, minPrice, price, disc, discPct: Math.round(disc * 100), mult, base, qty: Math.round(base * mult), strengths, current };
+}
+// candidate item/group options for the smart search — relevant to vendor (+ format via assortment)
+function aceTargetOptions(a) {
+  const m = state._master || {};
+  let items = (m.items || []).filter((i) => i.barcode);
+  if (a.vendor_id) items = items.filter((i) => i.original_vendor_id === a.vendor_id);
+  const assort = m.assortment || [];
+  if (a.format_code && assort.length) {
+    const inFmt = new Set(assort.filter((x) => x.parent_scope === "FORMAT" && String(x.parent_id) === String(a.format_code)).map((x) => x.item_barcode));
+    if (inFmt.size) items = items.filter((i) => inFmt.has(i.barcode));
+  }
+  const itemOpts = items.slice(0, 600).map((i) => ({ value: "I#" + i.barcode, text: `${i.description} · ${i.barcode}${i.dept_lv2_name ? " · " + i.dept_lv2_name : ""}` }));
+  let groups = m.item_groups || [];
+  if (a.vendor_id) groups = groups.filter((g) => { const lb = g.leader_barcode || groupLeader(g.group_code); const it = lb ? LK.items[lb] : null; return it ? it.original_vendor_id === a.vendor_id : true; });
+  const grpOpts = groups.map((g) => ({ value: "G#" + g.group_code, text: `מקבץ · ${g.description} · ${g.group_code}` }));
+  return itemOpts.concat(grpOpts);
+}
+function resolveAceTarget(a, text) {
+  text = (text || "").trim();
+  const opts = aceTargetOptions(a);
+  let o = opts.find((x) => x.text === text);
+  if (!o && text) { const t = text.toLowerCase(); o = opts.find((x) => x.text.toLowerCase().includes(t)); }
+  if (!o) { a.item_barcode = ""; a.group_code = ""; return; }
+  if (o.value.startsWith("I#")) { a.item_barcode = o.value.slice(2); a.group_code = ""; }
+  else { a.group_code = o.value.slice(2); a.item_barcode = ""; }
+}
+function aceHealth(a, c) {
+  const trade = Number(a.trade_agreement || 0);
+  const tile = (q, ans, tone, foot) => `<div class="health-tile"><div class="ht-q">${q}</div><div class="ht-a ${tone}">${ans}</div><div class="ht-calc">${foot}</div></div>`;
+  let t1;
+  if (trade > 0) {
+    const gi = gapInfo(c.qty, trade);
+    const unitCost = c.catalog * 0.6;
+    const excessUnits = Math.max(0, trade - c.qty), shortUnits = Math.max(0, c.qty - trade);
+    const excessCost = Math.round(excessUnits * unitCost * (0.0008 * 30 + 0.025 + 0.03));
+    const lostSale = Math.round(shortUnits * c.price);
+    if (c.qty >= trade) {
+      t1 = tile("חיזוי האס מול ההסכם המסחרי", `${gi.pct > 0 ? "+" : ""}${gi.pct}% מעל ההסכם`, gi.pct >= 15 ? "warn" : "good",
+        `חיזוי ${num(c.qty)} מול הסכם ${num(trade)}.${shortUnits > 0 ? ` הזמנה לפי ההסכם בלבד תחמיץ מכירות בשווי ${money(lostSale)}.` : ""}`);
+    } else {
+      t1 = tile("חיזוי האס מול ההסכם המסחרי", `${gi.pct}% מתחת להסכם`, "bad",
+        `ההסכם (${num(trade)}) גבוה מהחיזוי (${num(c.qty)}) → עודף מלאי צפוי בעלות ${money(excessCost)}.`);
+    }
+  } else {
+    t1 = tile("חיזוי האס מול ההסכם המסחרי", "לא הוזן הסכם", "neutral", "הזן הסכם מסחרי כדי לראות פערים ועלות עודף/חוסר.");
+  }
+  const t2 = tile("מיקום מול רמות החוזק", c.current.label,
+    c.current.cls === "VERY_DEEP" ? "warn" : "neutral",
+    `${c.discPct}% הנחה · חיזוי ${num(c.qty)} יח' (טווח ${num(c.strengths[0].qty)}–${num(c.strengths[3].qty)}).`);
+  const deepest = c.strengths[c.strengths.length - 1];
+  const t3 = tile("השפעת המחיר על החיזוי", "הורדת מחיר = חיזוי גבוה יותר", "neutral",
+    `במחיר הנמוך ביותר (${money(deepest.price)} · 80% הנחה) החיזוי מגיע ל-${num(deepest.qty)} יח'.`);
+  return `<div class="health-grid ace-health">${t1}${t2}${t3}</div>`;
 }
 function aceTargetName(a) {
   if (a.item_barcode) return aceItemName(a.item_barcode);
@@ -1457,22 +1518,17 @@ function drawAceEditor(view) {
   const fmtOpts = (m.formats || []).map((f) => [f.format_code, formatName(f.format_code)]);
   const venOpts = (m.vendors || []).map((v) => [v.vendor_id, v.name]);
   const dispOpts = (m.display_types || []).map((x) => [x.code, x.description_he]);
-  let itemOpts = (m.items || []).filter((i) => i.barcode);
-  if (a.vendor_id) itemOpts = itemOpts.filter((i) => i.original_vendor_id === a.vendor_id);
-  const itemPairs = itemOpts.slice(0, 400).map((i) => [i.barcode, i.description]);
-  const grpPairs = (m.item_groups || []).map((g) => [g.group_code, g.description]);
-  const targetToggle = `<div class="dir-chip">
-    <button class="${a.target === "item" ? "active" : ""}" data-acetarget="item">פריט</button>
-    <button class="${a.target === "group" ? "active" : ""}" data-acetarget="group">מקבץ</button></div>`;
-  const targetField = a.target === "group"
-    ? aceSelect("group_code", a.group_code, grpPairs)
-    : aceSelect("item_barcode", a.item_barcode, itemPairs);
+  const tgtOpts = aceTargetOptions(a);
+  const curTgt = a.item_barcode ? ((tgtOpts.find((o) => o.value === "I#" + a.item_barcode) || {}).text || "")
+    : a.group_code ? ((tgtOpts.find((o) => o.value === "G#" + a.group_code) || {}).text || "") : "";
+  const targetField = `<input class="select" list="dl-acetgt" data-acesearch value="${esc(curTgt)}" placeholder="חפש פריט/מקבץ — תיאור, ברקוד או היררכיה" autocomplete="off">
+    <datalist id="dl-acetgt">${tgtOpts.map((o) => `<option value="${esc(o.text)}"></option>`).join("")}</datalist>`;
   const form = `<div class="ace-form">
     ${aceField("שם האס", true, `<input class="select" data-acef="name" value="${esc(a.name || "")}" placeholder="שם תיאורי למבצע האס">`)}
     ${aceField("פורמט", true, aceSelect("format_code", a.format_code, fmtOpts))}
     ${aceField("ספק", true, aceSelect("vendor_id", a.vendor_id, venOpts))}
     ${aceField("אמצעי תצוגה", true, aceSelect("display_type_code", a.display_type_code, dispOpts))}
-    ${aceField("פריט / מקבץ", true, targetToggle + targetField)}
+    ${aceField("פריט / מקבץ", true, targetField)}
     ${aceField("תאריך התחלה", true, `<input class="select" type="date" data-acef="start_date" value="${esc(a.start_date || "")}">`)}
     ${aceField("תאריך סיום (רשות)", false, `<input class="select" type="date" data-acef="end_date" value="${esc(a.end_date || "")}">`)}
     ${aceField("הסכם מסחרי (רשות)", false, `<input class="select" type="number" min="0" step="50" data-acef="trade_agreement" value="${esc(a.trade_agreement || "")}" placeholder="כמות מחויבת">`)}
@@ -1490,6 +1546,7 @@ function drawAceEditor(view) {
       <div class="pd-meta">${a.item_barcode || a.group_code ? `<span dir="auto">${esc(aceTargetName(a))}</span>` : "טרם הוגדר פריט"}${a.start_date ? `<span class="sep">·</span>${sdate(a.start_date)}${a.end_date ? " → " + sdate(a.end_date) : ""}` : ""}</div></div>
     <div class="pd-zone"><div class="pd-zone-title">פרטי האס</div>${form}</div>
     <div class="pd-zone"><div class="pd-zone-title">חוזק ותמחור</div>${viz}</div>
+    ${hasTarget ? `<div class="pd-zone"><div class="pd-zone-title">בריאות ההחלטה</div><div id="ace-health">${aceHealth(a, c)}</div></div>` : ""}
     ${history ? `<div class="pd-zone"><div class="pd-zone-title">מבצעי עבר על הפריט</div>${history}</div>` : ""}
     <div class="pd-zone"><div class="pd-zone-title">קישור למבצע שוטף</div>${linkBlock}</div>
     <div class="ace-actions">
@@ -1518,7 +1575,8 @@ function aceStrengthViz(a, c) {
 function aceHistory(a, c) {
   const bc = a.item_barcode || (a.group_code ? groupLeader(a.group_code) : "");
   const vName = a.vendor_id ? (LK.vendors[a.vendor_id] || a.vendor_id) : "";
-  const real = ((state._promo && state._promo.promotions) || []).filter((p) => p.representing_barcode === bc)
+  const today = ymd(PROMO_NOW);
+  const real = ((state._promo && state._promo.promotions) || []).filter((p) => p.representing_barcode === bc && (p.start_date || "") < today)
     .sort((x, y) => (y.start_date || "").localeCompare(x.start_date || "")).slice(0, 4)
     .map((p) => ({ label: p.description, when: p.start_date, disc: p._disc != null ? p._disc : promoDisc(p), appr: Number(p.original_forecast_total || 0), sold: Number(p.sold_total || 0) }));
   const rows = (real.length ? real : ACE_STR.map((s, i) => ({ label: "מבצע עבר " + (i + 1), when: promoNowPlus(-30 - i * 20), disc: [15, 25, 33, 40][i], appr: Math.round(c.base * s.mult), sold: Math.round(c.base * s.mult * jit("h" + bc + i, 0.85, 1.1)) })))
@@ -1549,15 +1607,12 @@ function attachAceHandlers(view) {
   view.querySelectorAll("[data-route]").forEach((el) => el.addEventListener("click", () => navigate(el.dataset.route)));
   view.querySelectorAll("[data-acef]").forEach((el) => el.addEventListener("change", () => {
     const k = el.dataset.acef; state._aceDraft[k] = el.value;
-    if (k === "vendor_id") { state._aceDraft.item_barcode = ""; }
+    if (k === "vendor_id" || k === "format_code") { state._aceDraft.item_barcode = ""; state._aceDraft.group_code = ""; }
     if (k === "linked_promo_id" && el.value) state._aceDraft.linked_promo_id = el.value;
     drawAceEditor(view);
   }));
-  view.querySelectorAll("[data-acetarget]").forEach((el) => el.addEventListener("click", () => {
-    state._aceDraft.target = el.dataset.acetarget;
-    if (el.dataset.acetarget === "item") state._aceDraft.group_code = ""; else state._aceDraft.item_barcode = "";
-    drawAceEditor(view);
-  }));
+  const search = view.querySelector("[data-acesearch]");
+  if (search) search.addEventListener("change", () => { resolveAceTarget(state._aceDraft, search.value); drawAceEditor(view); });
   view.querySelectorAll("[data-acestr]").forEach((el) => el.addEventListener("click", () => {
     const s = aceCompute(state._aceDraft).strengths.find((x) => x.cls === el.dataset.acestr);
     if (s) { state._aceDraft.price = s.price; drawAceEditor(view); }
@@ -1570,6 +1625,7 @@ function attachAceHandlers(view) {
     set("#ace-price-val", money(c.price)); set("#ace-disc-val", c.discPct + "% הנחה"); set("#ace-str-val", c.current.label);
     const big = view.querySelector(".ace-qty-big .role-num"); if (big) big.textContent = num(c.qty);
     view.querySelectorAll(".str-btn").forEach((b) => b.classList.toggle("active", b.dataset.acestr === c.current.cls));
+    const health = view.querySelector("#ace-health"); if (health) health.innerHTML = aceHealth(state._aceDraft, c);
   });
   const unlink = view.querySelector("[data-aceunlink]");
   if (unlink) unlink.addEventListener("click", () => { state._aceDraft.linked_promo_id = ""; drawAceEditor(view); });
