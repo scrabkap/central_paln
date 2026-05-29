@@ -222,6 +222,52 @@ WH_ITEMS = {
 WH_OF_ITEM = {bc: wh for wh, lst in WH_ITEMS.items() for bc in lst}
 
 
+# --- generate a wide item catalog so promotions span many SKUs ---
+_CATS = [
+    ("D10", "מוצרי חלב וביצים"), ("D20", "מזון יבש"), ("D30", "ממתקים וחטיפים"),
+    ("D40", "משקאות"), ("D50", "טואלטיקה וניקיון"), ("D60", "פירות וירקות"),
+    ("D70", "קפואים"), ("D80", "בשר ועוף"), ("D90", "יין ואלכוהול"),
+    ("D95", "מוצרי תינוקות"),
+]
+_CAT_WORDS = {
+    "D10": ["גבינה צהובה", "יוגורט", "חלב", "שמנת", "קוטג'", "חמאה", "לבן", "מעדן חלב"],
+    "D20": ["פסטה", "אורז", "קטשופ", "טונה", "קמח", "סוכר", "שמן זית", "דגני בוקר", "תה", "קפה"],
+    "D30": ["שוקולד", "חטיף", "ופלים", "עוגיות", "סוכריות", "מסטיק", "חטיף אנרגיה", "פיצוחים"],
+    "D40": ["מיץ", "קולה", "סודה", "מים מינרליים", "משקה אנרגיה", "תרכיז", "בירה", "משקה קל"],
+    "D50": ["נייר טואלט", "מגבונים", "סבון", "שמפו", "אבקת כביסה", "מרכך", "נוזל כלים", "אקונומיקה"],
+    "D60": ["עגבניות", "מלפפון", "תפוחים", "בננה", "גזר", "חסה", "פלפל", "בצל"],
+    "D70": ["פיצה", "שניצל", "ירקות קפואים", "גלידה", "מלאווח", "בורקס", "דג סלמון"],
+    "D80": ["חזה עוף", "בשר טחון", "הודו", "נקניקיות", "קבב", "שניצל עוף"],
+    "D90": ["יין אדום", "יין לבן", "וודקה", "וויסקי", "בירה חבית", "ערק"],
+    "D95": ["חיתולים", "מטרנה", "מחית פרי", "מגבוני תינוק", "דייסת תינוקות"],
+}
+_SIZES = ["250 גרם", "500 גרם", "1 ק\"ג", "1.5 ליטר", "6 יח'", "12 יח'", "טרי", "משפחתי"]
+
+
+def _gen_items(n=130):
+    rng = random.Random(606)
+    vendors = [v[0] for v in VENDORS]
+    out = []
+    for i in range(n):
+        cat = rng.choice(_CATS)
+        word = rng.choice(_CAT_WORDS[cat[0]])
+        bc = str(7290200000000 + i * 7)
+        supply = rng.choices(["WH", "DIRECT"], weights=[3, 2])[0]
+        out.append((bc, f"{word} {rng.choice(_SIZES)}", "UNITS",
+                    rng.choice(vendors), None, None, supply, cat))
+    return out
+
+
+_EXTRA_ITEMS = _gen_items(130)
+ITEMS = ITEMS + _EXTRA_ITEMS
+ITEM_BY_BARCODE = {it[0]: it for it in ITEMS}
+_WH_LIST = [w[0] for w in WAREHOUSES]
+for _i, _it in enumerate(_EXTRA_ITEMS):
+    if _it[6] == "WH" and _it[0] not in WH_OF_ITEM:
+        WH_OF_ITEM[_it[0]] = _WH_LIST[_i % len(_WH_LIST)]
+
+
+
 def build_master():
     for code, desc in FORMATS:
         put("formats", base_meta(
@@ -583,8 +629,8 @@ def build_forecast():
 # promotions (regular + ACES)
 # --------------------------------------------------------------------------
 def build_promotions():
-    plan = (["COMPLETED"] * 18 + ["ONGOING"] * 12
-            + ["UPCOMING_SOON"] * 22 + ["UPCOMING_LATER"] * 8)
+    plan = (["COMPLETED"] * 150 + ["ONGOING"] * 90
+            + ["UPCOMING_SOON"] * 180 + ["UPCOMING_LATER"] * 80)
     reps = [it for it in ITEMS if not (it[4] and it[4] != it[0])]
     for idx, phase in enumerate(plan):
         rep = reps[idx % len(reps)]
@@ -604,8 +650,9 @@ def build_promotions():
         _write_promo(pid, "REGULAR_UNIVERSE", fmt, disp, ptype, bc, grp,
                      cat, price, start, end, phase, agg, trade, managing_wh)
 
-    # ---- ACES (secondary: last-minute, price unknown, strength scale) ----
-    for j, phase in enumerate(["UPCOMING_SOON", "ONGOING"]):
+    # ---- ACES (last-minute, price unknown, strength scale) ----
+    aces_plan = ["UPCOMING_SOON"] * 24 + ["ONGOING"] * 12 + ["COMPLETED"] * 8
+    for j, phase in enumerate(aces_plan):
         rep = reps[(j + 2) % len(reps)]
         bc, grp, supply = rep[0], rep[5], rep[6]
         fmt = PROMO_FORMATS[(j + 1) % len(PROMO_FORMATS)]
@@ -676,13 +723,13 @@ def _alloc_block(pid, fmt, disp, ptype, members, stores, phase, start):
                 "ONGOING": round(random.uniform(0.45, 0.7), 2)}.get(phase, 0.0)
     agg = {"orig": 0, "appr": 0, "ord": 0, "sold": 0, "recom": 0,
            "wh_recom": 0, "wh_ord": 0, "stores": set()}
-    per_item_recom = {}
+    # accumulate per-item totals across the promo's stores (no per-store rows
+    # are stored — store-level detail is synthesized on demand at drill time)
+    per_item = {}
     for (sid, sname, sfmt, size, capv) in stores:
         cap = float(capv)
+        agg["stores"].add(sid)
         for mbc in members:
-            info = ITEM_BY_BARCODE[mbc]
-            mven, msupply = info[3], info[6]
-            mwh = WH_OF_ITEM.get(mbc) if msupply == "WH" else None
             orig = round(random.uniform(60, 380) * cap)
             appr = round(orig * random.uniform(0.85, 1.18))
             recom = round(appr * random.uniform(0.9, 1.08))
@@ -693,44 +740,49 @@ def _alloc_block(pid, fmt, disp, ptype, members, stores, phase, start):
             agg["ord"] += ordered
             agg["sold"] += sold
             agg["recom"] += recom
-            agg["stores"].add(sid)
-            per_item_recom[mbc] = per_item_recom.get(mbc, 0) + recom
-            dept = info[7]
-            put("promotions", {
-                "PK": f"PROMO#{pid}", "SK": f"ALLOC#STORE#{sid}#ITEM#{mbc}",
-                "promo_id": pid, "store_id": sid, "store_name": sname,
-                "format_code": fmt, "display_type_code": disp,
-                "item_barcode": mbc, "item_desc": info[1],
-                "category_code": dept[0], "category_name": dept[1],
-                "vendor_id": mven, "supply_method": msupply,
-                "managing_warehouse_id": mwh, "promo_type_code": ptype,
-                "phase": phase,
-                "original_forecast_qty": d(orig),
-                "approved_forecast_qty": d(appr),
-                "store_recommended_qty": d(recom),
-                "store_ordered_qty": d(ordered),
-                "sold_qty": d(sold),
-                "record_type": "allocation",
-                "GSI3PK": f"STORE#{sid}#ITEM#{mbc}",
-                "GSI3SK": f"START#{iso(start)}#PROMO#{pid}",
-            })
-    for mbc in members:
+            pi = per_item.setdefault(mbc, {"orig": 0, "appr": 0, "ord": 0, "sold": 0, "recom": 0})
+            pi["orig"] += orig
+            pi["appr"] += appr
+            pi["ord"] += ordered
+            pi["sold"] += sold
+            pi["recom"] += recom
+    n_stores = len(stores)
+    for mbc, pi in per_item.items():
         info = ITEM_BY_BARCODE[mbc]
-        if info[6] != "WH":
-            continue
-        mwh = WH_OF_ITEM.get(mbc, "6000")
-        wh_recom = round(per_item_recom.get(mbc, 0) * random.uniform(1.0, 1.15))
-        wh_ord = round(wh_recom * random.uniform(0.75, 1.05)) if ordering else 0
-        agg["wh_recom"] += wh_recom
-        agg["wh_ord"] += wh_ord
+        mven, msupply = info[3], info[6]
+        mwh = WH_OF_ITEM.get(mbc) if msupply == "WH" else None
+        dept = info[7]
         put("promotions", {
-            "PK": f"PROMO#{pid}", "SK": f"WHSUP#{mwh}#ITEM#{mbc}",
-            "promo_id": pid, "warehouse_id": mwh, "item_barcode": mbc,
-            "item_desc": info[1], "vendor_id": info[3],
-            "wh_recommended_qty": d(wh_recom), "wh_ordered_qty": d(wh_ord),
-            "record_type": "wh_supply",
+            "PK": f"PROMO#{pid}", "SK": f"ITEMAGG#{mbc}",
+            "promo_id": pid, "item_barcode": mbc, "item_desc": info[1],
+            "category_code": dept[0], "category_name": dept[1],
+            "format_code": fmt, "display_type_code": disp,
+            "vendor_id": mven, "supply_method": msupply,
+            "managing_warehouse_id": mwh, "promo_type_code": ptype, "phase": phase,
+            "original_forecast_qty": d(pi["orig"]),
+            "approved_forecast_qty": d(pi["appr"]),
+            "store_recommended_qty": d(pi["recom"]),
+            "store_ordered_qty": d(pi["ord"]),
+            "sold_qty": d(pi["sold"]), "store_count": n_stores,
+            "record_type": "promo_item",
+            "GSI3PK": f"ITEM#{mbc}", "GSI3SK": f"START#{iso(start)}#PROMO#{pid}",
         })
+        if msupply == "WH":
+            mwh2 = mwh or "6000"
+            wh_recom = round(pi["recom"] * random.uniform(1.0, 1.15))
+            wh_ord = round(wh_recom * random.uniform(0.75, 1.05)) if ordering else 0
+            agg["wh_recom"] += wh_recom
+            agg["wh_ord"] += wh_ord
+            put("promotions", {
+                "PK": f"PROMO#{pid}", "SK": f"WHSUP#{mwh2}#ITEM#{mbc}",
+                "promo_id": pid, "warehouse_id": mwh2, "item_barcode": mbc,
+                "item_desc": info[1], "vendor_id": info[3],
+                "wh_recommended_qty": d(wh_recom), "wh_ordered_qty": d(wh_ord),
+                "record_type": "wh_supply",
+            })
+    agg["store_ids"] = sorted(agg["stores"])
     return agg
+
 
 
 def _write_promo(pid, atype, fmt, disp, ptype, rep_bc, grp, cat, price,
@@ -740,11 +792,15 @@ def _write_promo(pid, atype, fmt, disp, ptype, rep_bc, grp, cat, price,
     desc = (f"{ITEM_BY_BARCODE[rep_bc][1]} — {PROMO_TYPE_HE.get(ptype, 'מבצע')}"
             if atype == "REGULAR_UNIVERSE"
             else f"ACES {ITEM_BY_BARCODE[rep_bc][1]}")
+    days = max(1, (end - start).days)
+    # sales in the two weeks before the campaign (baseline, no promo lift)
+    baseline_2w = round(agg["appr"] * random.uniform(0.25, 0.6) * (14 / days))
+    unit_cost = round((cat or random.uniform(3, 18)) * random.uniform(0.5, 0.7), 2)
     put("promotions", {
         "PK": f"PROMO#{pid}", "SK": "METADATA", "promo_id": pid,
         "activity_type": atype, "format_code": fmt, "display_type_code": disp,
         "promo_type_code": ptype, "is_newspaper": disp == "Z000",
-        "loyalty_segment_code": random.choice(["000", "001", "002"]),
+        "loyalty_segment_code": random.choice(["000", "001", "002", "003"]),
         "coupon_required": atype == "ACES",
         "representing_barcode": rep_bc, "item_group_code": grp,
         "description": desc,
@@ -754,6 +810,9 @@ def _write_promo(pid, atype, fmt, disp, ptype, rep_bc, grp, cat, price,
         "promo_price": d(price) if price is not None else None,
         "discount_pct": d(disc) if disc is not None else None,
         "start_date": iso(start), "end_date": iso(end), "phase": phase,
+        "duration_days": days,
+        "baseline_units_2w": d(baseline_2w), "unit_cost": d(unit_cost),
+        "store_ids": agg.get("store_ids", []),
         "vendor_id": ITEM_BY_BARCODE[rep_bc][3],
         "managing_warehouse_id": managing_wh,
         "trade_agreement_qty": d(trade), "store_count": len(agg["stores"]),

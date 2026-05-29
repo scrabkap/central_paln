@@ -159,10 +159,16 @@ jobs:
             -H "Origin: $CF" -H 'Access-Control-Request-Method: POST' \
             -H 'Access-Control-Request-Headers: content-type' | grep -i 'access-control-allow-origin' \
             || echo "::warning::no CORS header on preflight"
-          # 3) data route with the issued token
+          # 3) data routes with the issued token
           TOKEN=$(sed -n 's/.*"token": *"\([^"]*\)".*/\1/p' /tmp/login.json)
           OVCODE=$(curl -s -o /tmp/ov.json -w '%{http_code}' -m 30 "$API/api/overview" -H "authorization: Bearer $TOKEN")
           echo "overview http=$OVCODE ok=$(grep -o '"ok": *[a-z]*' /tmp/ov.json | head -1)"
+          curl -s -o /tmp/promos.json -m 30 "$API/api/promotions" -H "authorization: Bearer $TOKEN"
+          grep -q '"promo_items"' /tmp/promos.json || { echo "::error::/api/promotions missing promo_items"; exit 1; }
+          echo "promotions bytes=$(wc -c < /tmp/promos.json)"
+          curl -s -o /tmp/pd.json -m 30 "$API/api/promo?promo_id=PROMO-2001" -H "authorization: Bearer $TOKEN"
+          grep -q '"allocations"' /tmp/pd.json || { echo "::error::/api/promo detail missing allocations"; exit 1; }
+          echo "promo-detail ok"
           # 4) the SPA loads with the API URL injected
           echo "== GET $CF (SPA) =="
           curl -s -m 30 "$CF/config.js"; echo

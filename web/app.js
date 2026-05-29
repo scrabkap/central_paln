@@ -433,7 +433,10 @@ const promoDisc = (p) => p.discount_pct != null ? Number(p.discount_pct)
   : (p.catalog_price && p.promo_price ? Math.round((1 - p.promo_price / p.catalog_price) * 100) : null);
 const sumOf = (arr, k) => arr.reduce((a, x) => a + Number(x[k] || 0), 0);
 const avgOf = (arr, k) => arr.length ? Math.round(arr.reduce((a, x) => a + Number(x[k] || 0), 0) / arr.length) : null;
-const fqTone = (q) => q == null ? "gray" : (q >= 90 && q <= 110) ? "green" : (q >= 75 && q <= 125) ? "amber" : "red";
+const cap100 = (v) => v == null ? null : Math.min(100, Math.round(v));
+// forecast quality as a symmetric accuracy (0-100): 100 = sold equals approved
+const fqAcc = (sold, appr) => (sold > 0 && appr > 0) ? Math.max(0, Math.round(100 - Math.abs(sold - appr) / appr * 100)) : null;
+const fqTone = (q) => q == null ? "gray" : q >= 90 ? "green" : q >= 75 ? "amber" : "red";
 const adoptTone = (q) => q == null ? "gray" : q >= 90 ? "green" : q >= 70 ? "amber" : "red";
 function promoPhaseBadge(p) {
   const ph = p._phase || promoPhase(p);
@@ -465,7 +468,7 @@ PAGES.promotions = async () => {
   const d = await load("/api/promotions");
   if (!d) return `<div class="empty">אין נתונים</div>`;
   state._promo = d;
-  state._promoF = { bucket: "next2w", format: "", display: "", vendor: "", category: "", ptype: "", wh: "" };
+  state._promoF = { bucket: "next2w", format: "", display: "", vendor: "", category: "", item: "", ptype: "", wh: "" };
   state._promoX = new Set();
   state._promoOpts = {};
   state._approvedOverride = {};
@@ -502,14 +505,17 @@ function promoScope() {
     && (!F.display || a.display_type_code === F.display)
     && (!F.vendor || a.vendor_id === F.vendor)
     && (!F.category || a.category_code === F.category)
+    && (!F.item || a.item_barcode === F.item)
     && (!F.ptype || a.promo_type_code === F.ptype)
     && (!F.wh || (a.managing_warehouse_id || "") === F.wh);
-  const allocs = (d.allocations || []).filter((a) => { const p = pmap[a.promo_id]; return p && inBucket(p) && dimOk(a); });
+  // "lines" are per-promo-item aggregates (store rows are loaded on drill)
+  const allocs = (d.promo_items || []).filter((a) => { const p = pmap[a.promo_id]; return p && inBucket(p) && dimOk(a); });
   const whCat = (w) => { const it = LK.items[w.item_barcode]; return it ? it.dept_lv2_code : null; };
   const whsup = (d.wh_supply || []).filter((w) => {
     const p = pmap[w.promo_id]; if (!p || !inBucket(p)) return false;
     return (!F.format || p.format_code === F.format) && (!F.display || p.display_type_code === F.display)
       && (!F.vendor || w.vendor_id === F.vendor) && (!F.category || whCat(w) === F.category)
+      && (!F.item || w.item_barcode === F.item)
       && (!F.ptype || p.promo_type_code === F.ptype) && (!F.wh || (w.warehouse_id || "") === F.wh);
   });
   const ids = new Set(allocs.map((a) => a.promo_id));
@@ -544,30 +550,44 @@ function buildPromoTree(allocs, pmap) {
   }
   return out;
 }
+function storeCountOf(pids, pmap) {
+  const s = new Set();
+  pids.forEach((pid) => { const p = pmap[pid]; if (p && p.store_ids) p.store_ids.forEach((x) => s.add(x)); });
+  return s.size;
+}
 function aggNode(node) {
   const a = node.allocs || [];
+  const pids = new Set(a.map((x) => x.promo_id));
   let trade = 0;
   if (node.kind === "promo") trade = Number(node.promo && node.promo.trade_agreement_qty || 0);
-  else new Set(a.map((x) => x.promo_id)).forEach((pid) => { trade += Number(node.pmap[pid] && node.pmap[pid].trade_agreement_qty || 0); });
+  else pids.forEach((pid) => { trade += Number(node.pmap[pid] && node.pmap[pid].trade_agreement_qty || 0); });
   let appr = sumOf(a, "approved_forecast_qty");
   if (node.kind === "format" && state._approvedOverride[node.fmt] != null) appr = Number(state._approvedOverride[node.fmt]);
   const ord = sumOf(a, "store_ordered_qty"), sold = sumOf(a, "sold_qty"), recom = sumOf(a, "store_recommended_qty");
   return {
-    storeCount: new Set(a.map((x) => x.store_id)).size,
+    storeCount: storeCountOf(pids, node.pmap),
+    itemCount: new Set(a.map((x) => x.item_barcode)).size,
     orig: sumOf(a, "original_forecast_qty"), appr, ord, sold, recom, trade,
-    fq: sold > 0 ? Math.round(sold / appr * 100) : null,
-    adopt: recom > 0 ? Math.round(ord / recom * 100) : null,
+    fq: fqAcc(sold, appr), fqRatio: (sold > 0 && appr > 0) ? sold / appr : null,
+    adopt: recom > 0 ? cap100(Math.round(ord / recom * 100)) : null,
   };
+}
+function tradeWarn(m) {
+  const w = [];
+  if (m.trade > 0 && m.appr < m.trade) {
+    const gap = (m.trade - m.appr) / m.trade;
+    w.push(gap > 0.10 ? `<span class="badge red">חלש מול הסכם</span>` : `<span class="badge amber">פער קל מול הסכם</span>`);
+  }
+  if (m.adopt != null && m.adopt < 70) w.push(`<span class="badge amber">אימוץ נמוך</span>`);
+  if (m.fqRatio != null && m.fqRatio < 0.75) w.push(`<span class="badge amber">מכר מתחת לחיזוי</span>`);
+  if (m.fqRatio != null && m.fqRatio > 1.25) w.push(`<span class="badge red">מכר מעל לחיזוי</span>`);
+  return w;
 }
 function renderPromoNode(node) {
   const m = aggNode(node);
   const isPromo = node.kind === "promo";
   const exp = !isPromo && state._promoX.has(node.id);
-  const weak = m.trade > 0 && m.appr < m.trade;
-  const warn = [];
-  if (weak) warn.push(`<span class="badge red">חלש מול הסכם</span>`);
-  if (m.adopt != null && m.adopt < 70) warn.push(`<span class="badge amber">אימוץ נמוך</span>`);
-  if (m.fq != null && (m.fq < 75 || m.fq > 125)) warn.push(`<span class="badge ${m.fq > 125 ? "red" : "amber"}">חיזוי ${m.fq < 100 ? "מעל" : "מתחת"} למכר</span>`);
+  const warn = tradeWarn(m);
   const override = node.kind === "format" && state._approvedOverride[node.fmt] != null;
   const chevron = isPromo ? `<span style="display:inline-block;width:14px"></span>`
     : `<span style="display:inline-block;width:14px">${exp ? "▾" : "▸"}</span>`;
@@ -575,7 +595,7 @@ function renderPromoNode(node) {
   const rowAttr = isPromo ? `class="clickable"` : `data-toggle="${esc(node.id)}" class="clickable"`;
   const row = `<tr ${rowAttr}>
     <td style="padding-inline-start:${node.depth * 18 + 12}px">${chevron} ${name}</td>
-    <td class="num">${m.storeCount}</td><td class="num">${num(m.orig)}</td>
+    <td class="num">${m.storeCount}</td><td class="num">${m.itemCount}</td><td class="num">${num(m.orig)}</td>
     <td class="num">${num(m.appr)}${override ? ' <span class="badge violet">ידני</span>' : ""}</td>
     <td class="num">${num(m.ord)}</td><td class="num">${m.sold ? num(m.sold) : "—"}</td>
     <td class="num">${m.fq == null ? "—" : `<span class="badge ${fqTone(m.fq)}">${m.fq}%</span>`}</td>
@@ -594,20 +614,21 @@ function aggMetrics(allocs, pmap, override) {
   let trade = 0, disc = 0, otif = 0, avail = 0, shrink = 0, n = 0;
   pids.forEach((pid) => { const p = pmap[pid]; if (p) { trade += Number(p.trade_agreement_qty || 0); disc += Number(p._disc || 0); otif += Number(p.otif_pct || 0); avail += Number(p.availability_pct || 0); shrink += Number(p.shrink_pct || 0); n++; } });
   return {
-    storeCount: new Set(allocs.map((a) => a.store_id)).size, promoCount: pids.size,
+    storeCount: storeCountOf(pids, pmap), promoCount: pids.size,
+    itemCount: new Set(allocs.map((a) => a.item_barcode)).size,
     orig: sumOf(allocs, "original_forecast_qty"), appr, apprRolled, ord, sold, recom, trade,
-    fq: sold > 0 ? Math.round(sold / appr * 100) : null,
-    adopt: recom > 0 ? Math.round(ord / recom * 100) : null,
-    disc: n ? Math.round(disc / n) : null, cover: trade > 0 ? Math.round(appr / trade * 100) : null,
-    otif: n ? Math.round(otif / n) : null, avail: n ? Math.round(avail / n) : null,
+    fq: fqAcc(sold, appr), fqRatio: (sold > 0 && appr > 0) ? sold / appr : null,
+    adopt: recom > 0 ? cap100(Math.round(ord / recom * 100)) : null,
+    disc: n ? Math.round(disc / n) : null, cover: trade > 0 ? cap100(Math.round(appr / trade * 100)) : null,
+    otif: n ? cap100(Math.round(otif / n)) : null, avail: n ? cap100(Math.round(avail / n)) : null,
     shrink: n ? (shrink / n).toFixed(1) : null,
   };
 }
 function aggKpiChips(m, adoptW) {
   const chip = (v, l) => `<div class="chip"><div class="c-val">${v}</div><div class="c-lbl">${l}</div></div>`;
-  return `<div class="chips">${chip(m.storeCount, "סניפים")}${chip(m.promoCount, "מבצעים")}
+  return `<div class="chips">${chip(m.storeCount, "סניפים")}${chip(m.itemCount, "פריטים")}${chip(m.promoCount, "מבצעים")}
     ${chip(m.disc == null ? "—" : m.disc + "%", "% הנחה")}${chip(m.fq == null ? "—" : m.fq + "%", "איכות חיזוי")}
-    ${chip(m.adopt == null ? "—" : m.adopt + "%", "אימוץ סניפים")}${chip(adoptW == null ? "—" : adoptW + "%", "אימוץ מחסנים")}
+    ${chip(m.adopt == null ? "—" : m.adopt + "%", "אימוץ סניפים")}${chip(adoptW == null ? "—" : cap100(adoptW) + "%", "אימוץ מחסנים")}
     ${chip(m.cover == null ? "—" : m.cover + "%", "כיסוי הסכם")}${chip(m.otif == null ? "—" : m.otif + "%", "OTIF")}
     ${chip(m.avail == null ? "—" : m.avail + "%", "זמינות")}${chip(m.shrink == null ? "—" : m.shrink + "%", "פחת")}</div>`;
 }
@@ -616,13 +637,13 @@ function aggBreakdown(allocs, pmap, keyFn, labelFn, openFn, colTitle) {
   for (const [k, arr] of groupMap(allocs, keyFn)) {
     const m = aggMetrics(arr, pmap, null);
     rows += `<tr class="clickable" data-open="${esc(openFn(k))}">
-      <td><span dir="auto">${esc(labelFn(k))}</span></td><td class="num">${m.storeCount}</td>
+      <td><span dir="auto">${esc(labelFn(k))}</span></td><td class="num">${m.storeCount}</td><td class="num">${m.itemCount}</td>
       <td class="num">${num(m.orig)}</td><td class="num">${num(m.appr)}</td><td class="num">${num(m.ord)}</td>
       <td class="num">${m.sold ? num(m.sold) : "—"}</td>
       <td class="num">${m.fq == null ? "—" : `<span class="badge ${fqTone(m.fq)}">${m.fq}%</span>`}</td>
       <td class="num">${m.adopt == null ? "—" : `<span class="badge ${adoptTone(m.adopt)}">${m.adopt}%</span>`}</td></tr>`;
   }
-  return `<h4>${esc(colTitle)} — לחיצה לפירוט</h4><div class="table-wrap"><table class="data"><thead><tr><th>${esc(colTitle)}</th><th class="num">סניפים</th><th class="num">מקורי</th><th class="num">מאושר</th><th class="num">הוזמן</th><th class="num">נמכר</th><th class="num">איכות</th><th class="num">אימוץ</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  return `<h4>${esc(colTitle)} — לחיצה לפירוט</h4><div class="table-wrap"><table class="data"><thead><tr><th>${esc(colTitle)}</th><th class="num">סניפים</th><th class="num">פריטים</th><th class="num">מקורי</th><th class="num">מאושר</th><th class="num">הוזמן</th><th class="num">נמכר</th><th class="num">איכות</th><th class="num">אימוץ</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 function openAggPopup(spec) {
   const ci = spec.indexOf(":"); const kind = spec.slice(0, ci), arg = spec.slice(ci + 1);
@@ -692,14 +713,16 @@ function renderPromo() {
   const d = state._promo, F = state._promoF;
   const { allocs, whsup, scoped, pmap } = promoScope();
 
-  const regAll = (d.allocations || []).filter((a) => { const p = pmap[a.promo_id] || (d.promotions || []).find((x) => x.promo_id === a.promo_id); return p && (p.activity_type === "REGULAR_UNIVERSE" || pmap[a.promo_id]); });
+  const regAll = (d.promo_items || []).filter((a) => pmap[a.promo_id]);
   const uniq = (arr) => [...new Set(arr)].filter((x) => x != null && x !== "");
-  const catName = {}; regAll.forEach((a) => { if (a.category_code) catName[a.category_code] = a.category_name; });
+  const catName = {}; const itemName = {};
+  regAll.forEach((a) => { if (a.category_code) catName[a.category_code] = a.category_name; if (a.item_barcode) itemName[a.item_barcode] = a.item_desc; });
   state._promoOpts = {
     format: uniq(regAll.map((a) => a.format_code)).map((v) => ({ value: v, text: formatName(v) + " · " + v })),
     vendor: uniq(regAll.map((a) => a.vendor_id)).map((v) => ({ value: v, text: (LK.vendors[v] || v) + " · " + v })),
     display: uniq(regAll.map((a) => a.display_type_code)).map((v) => ({ value: v, text: displayName(v) + " · " + v })),
     category: uniq(regAll.map((a) => a.category_code)).map((v) => ({ value: v, text: (catName[v] || v) + " · " + v })),
+    item: uniq(regAll.map((a) => a.item_barcode)).map((v) => ({ value: v, text: (itemName[v] || v) + " · " + v })),
     ptype: uniq(regAll.map((a) => a.promo_type_code)).map((v) => ({ value: v, text: ptypeName(v) + " · " + v })),
     wh: uniq(regAll.map((a) => a.managing_warehouse_id)).map((v) => ({ value: v, text: "מחסן " + v })),
   };
@@ -715,19 +738,21 @@ function renderPromo() {
   for (const [f, arr] of groupMap(allocs, (a) => a.format_code)) apprT += (state._approvedOverride[f] != null ? Number(state._approvedOverride[f]) : sumOf(arr, "approved_forecast_qty"));
   const ordT = sumOf(allocs, "store_ordered_qty"), soldT = sumOf(allocs, "sold_qty"), recomT = sumOf(allocs, "store_recommended_qty");
   const whRecom = sumOf(whsup, "wh_recommended_qty"), whOrd = sumOf(whsup, "wh_ordered_qty");
+  const storeCnt = storeCountOf(new Set(allocs.map((a) => a.promo_id)), pmap);
+  const itemCnt = uniq(allocs.map((a) => a.item_barcode)).length;
   const avgDisc = scoped.length ? Math.round(scoped.reduce((a, p) => a + (p._disc || 0), 0) / scoped.length) : 0;
-  const fq = soldT > 0 ? Math.round(soldT / apprT * 100) : null;
-  const adoptS = recomT > 0 ? Math.round(ordT / recomT * 100) : null;
-  const adoptW = whRecom > 0 ? Math.round(whOrd / whRecom * 100) : null;
+  const fq = fqAcc(soldT, apprT);
+  const adoptS = recomT > 0 ? cap100(Math.round(ordT / recomT * 100)) : null;
+  const adoptW = whRecom > 0 ? cap100(Math.round(whOrd / whRecom * 100)) : null;
   const atRisk = scoped.filter((p) => Number(p.approved_forecast_total || 0) < Number(p.trade_agreement_qty || 0)).length;
-  const otif = avgOf(scoped, "otif_pct"), avail = avgOf(scoped, "availability_pct");
+  const otif = cap100(avgOf(scoped, "otif_pct")), avail = cap100(avgOf(scoped, "availability_pct"));
   const shrink = scoped.length ? (scoped.reduce((a, p) => a + Number(p.shrink_pct || 0), 0) / scoped.length).toFixed(1) : null;
   const toneV = { green: "good", amber: "warn", red: "bad", gray: "border", accent: "accent" };
   const kpi = (label, val, tone, sub) => `<div class="kpi"><div style="position:absolute;top:0;inset-inline-start:0;width:4px;height:100%;background:var(--${toneV[tone] || "accent"})"></div><div class="k-label">${label}</div><div class="k-val" style="font-size:24px">${val}</div><div class="k-meta">${sub || ""}</div></div>`;
   const kpis = `<div class="kpi-grid">
-    ${kpi("מבצעים בהיקף", String(scoped.length), "accent", `${new Set(allocs.map((a) => a.store_id)).size} סניפים`)}
+    ${kpi("מבצעים בהיקף", String(scoped.length), "accent", `${num(storeCnt)} סניפים · ${num(itemCnt)} פריטים`)}
     ${kpi("% הנחה ממוצע", avgDisc + "%", "accent")}
-    ${kpi("איכות חיזוי (מכר/מאושר)", fq == null ? "—" : fq + "%", fqTone(fq), fq == null ? "טרם נמכר" : "")}
+    ${kpi("איכות חיזוי (דיוק)", fq == null ? "—" : fq + "%", fqTone(fq), fq == null ? "טרם נמכר" : "")}
     ${kpi("% אימוץ סניפים", adoptS == null ? "—" : adoptS + "%", adoptTone(adoptS))}
     ${kpi("% אימוץ מחסנים", adoptW == null ? "—" : adoptW + "%", adoptTone(adoptW))}
     ${kpi("הסכם מסחרי בסיכון", String(atRisk), atRisk ? "red" : "green", "מבצעים חלשים מול הסכם")}
@@ -738,7 +763,7 @@ function renderPromo() {
 
   const tree = buildPromoTree(allocs, pmap);
   const treeRows = tree.map(renderPromoNode).join("");
-  const header = `<tr><th>פורמט → ספק → אמצעי תצוגה → היררכיה → מבצע</th><th class="num">סניפים</th><th class="num">חיזוי מקורי</th><th class="num">חיזוי מאושר</th><th class="num">הוזמן</th><th class="num">נמכר</th><th class="num">איכות חיזוי</th><th class="num">אימוץ</th><th class="num">הסכם מסחרי</th><th>התראה</th></tr>`;
+  const header = `<tr><th>פורמט → ספק → אמצעי תצוגה → היררכיה → מבצע</th><th class="num">סניפים</th><th class="num">פריטים</th><th class="num">חיזוי מקורי</th><th class="num">חיזוי מאושר</th><th class="num">הוזמן</th><th class="num">נמכר</th><th class="num">איכות חיזוי</th><th class="num">אימוץ</th><th class="num">הסכם מסחרי</th><th>התראה</th></tr>`;
   const banner = F.bucket === "next2w" ? `<div class="card" style="border-color:${atRisk ? "var(--bad)" : "var(--border)"};margin-bottom:16px"><div style="display:flex;gap:24px;align-items:center;flex-wrap:wrap"><div><div class="c-val" style="font-size:26px">${scoped.length}</div><div class="c-lbl">מבצעים ב-14 הימים הקרובים — לטיפול מיידי</div></div>${atRisk ? `<div style="color:#fca5a5"><div class="c-val" style="font-size:26px">${atRisk}</div><div class="c-lbl">⚠ חלשים מול הסכם מסחרי</div></div>` : ""}<div class="mut" style="flex:1;text-align:end;min-width:200px">אגרגציה: פורמט → ספק → אמצעי תצוגה → היררכיה → מבצע · לחיצה על כל רמה לפירוט ומדדים</div></div></div>` : "";
 
   root.innerHTML = `
@@ -749,11 +774,12 @@ function renderPromo() {
       ${combo("vendor", "ספק — הקלד קוד/שם")}
       ${combo("display", "אמצעי תצוגה — קוד/תיאור")}
       ${combo("category", "היררכיית פריט")}
+      ${combo("item", "פריט — קוד/תיאור")}
       ${combo("ptype", "סוג מבצע")}
       ${combo("wh", "מחסן מנהל")}
     </div>
     ${banner}${kpis}
-    <div class="section table-wrap"><table class="data"><thead>${header}</thead><tbody>${treeRows || `<tr><td colspan="10"><div class="empty">אין מבצעים בהיקף הנבחר</div></td></tr>`}</tbody></table></div>`;
+    <div class="section table-wrap"><table class="data"><thead>${header}</thead><tbody>${treeRows || `<tr><td colspan="11"><div class="empty">אין מבצעים בהיקף הנבחר</div></td></tr>`}</tbody></table></div>`;
 }
 
 PAGES.cannibalization = async () => {
@@ -929,6 +955,48 @@ function drill(spec) {
   const fn = DRILL[type];
   if (fn) fn(arg);
 }
+async function promoDetail(pid) {
+  state._promoDetail = state._promoDetail || {};
+  if (state._promoDetail[pid]) return state._promoDetail[pid];
+  const r = await api("/api/promo?promo_id=" + encodeURIComponent(pid));
+  const det = (r && r.ok) ? r.data : { allocations: [], wh_supply: [], aces_strength: [], header: null };
+  state._promoDetail[pid] = det;
+  return det;
+}
+// campaign retro / forecast analysis: sales lift, leftover stock days, revenue
+// uplift, and whether the trade agreement overshoots demand (storage/shrink/transport cost).
+function campaignAnalysis(p) {
+  const phase = promoPhase(p);
+  const days = Number(p.duration_days) || Math.max(1, Math.round((new Date(p.end_date) - new Date(p.start_date)) / 86400000));
+  const base2w = Number(p.baseline_units_2w || 0), baseDaily = base2w / 14;
+  const sold = Number(p.sold_total || 0), ordered = Number(p.ordered_total || 0);
+  const appr = Number(p.approved_forecast_total || 0), orig = Number(p.original_forecast_total || 0);
+  const trade = Number(p.trade_agreement_qty || 0), unitCost = Number(p.unit_cost || 0);
+  const promoPrice = Number(p.promo_price || 0), cat = Number(p.catalog_price || promoPrice || 0);
+  const campDaily = sold > 0 ? sold / days : null;
+  const boost = (baseDaily > 0 && campDaily != null) ? Math.round((campDaily / baseDaily - 1) * 100) : null;
+  const revCampaign = (sold > 0 && promoPrice) ? sold * promoPrice : null;
+  const revBaseline = (baseDaily > 0 && cat) ? baseDaily * days * cat : null;
+  const revUplift = (revCampaign != null && revBaseline != null) ? revCampaign - revBaseline : null;
+  const supplied = ordered || trade, consumed = sold || appr;
+  const leftover = Math.max(0, supplied - consumed);
+  const stockDaysAfter = baseDaily > 0 ? Math.round(leftover / baseDaily) : null;
+  const reference = phase === "COMPLETED" ? sold : Math.max(appr, orig);
+  const overshoot = Math.max(0, trade - reference);
+  const overshootValue = overshoot * unitCost;
+  const storageCost = overshootValue * 0.0008 * (stockDaysAfter || 30);
+  const shrinkCost = overshootValue * (Number(p.shrink_pct || 2) / 100);
+  const transportCost = overshootValue * 0.03;
+  const overshootCost = Math.round(storageCost + shrinkCost + transportCost);
+  let verdict, vtone;
+  if (trade <= 0) { verdict = "אין הסכם מסחרי"; vtone = "gray"; }
+  else if (overshoot <= trade * 0.05) { verdict = "ההסכם מכוסה ע\"י הביקוש — משתלם"; vtone = "green"; }
+  else if (revUplift != null && overshootCost > Math.max(1, revUplift) * 0.6) { verdict = "ההסכם גבוה מדי — עלות העודף שוחקת את התועלת"; vtone = "red"; }
+  else if (overshoot > trade * 0.2) { verdict = "עודף משמעותי מול הביקוש — לשקול הקטנת הסכם"; vtone = "red"; }
+  else { verdict = "עודף מנוהל — לעקוב"; vtone = "amber"; }
+  return { phase, days, baseDaily, sold, leftover, stockDaysAfter, boost, revCampaign, revBaseline, revUplift, overshoot, storageCost, shrinkCost, transportCost, overshootCost, verdict, vtone };
+}
+
 const DRILL = {
   kpi: (code) => {
     const d = state.cache["/api/overview"]; if (!d) return;
@@ -981,25 +1049,22 @@ const DRILL = {
         ["נוצר ע\"י", esc(run.created_by)], ["מס' סניפים", (run.store_filter || []).length], ["מס' פריטים", (run.item_filter || []).length],
       ]) + `<h4>הקצאות לסניף-פריט (${allocs.length})</h4>` + tableHTML(cols, allocs));
   },
-  promo: (pid) => {
-    const d = state._promo; const p0 = d.promotions.find((x) => x.promo_id === pid); if (!p0) return;
+  promo: async (pid) => {
+    const d = state._promo; const p0 = (d.promotions || []).find((x) => x.promo_id === pid); if (!p0) return;
     const p = { ...p0, _phase: promoPhase(p0), _days: promoDays(p0.start_date), _disc: promoDisc(p0) };
-    const allocs = d.allocations.filter((a) => a.promo_id === pid);
-    const whsup = (d.wh_supply || []).filter((w) => w.promo_id === pid);
-    const strength = (d.aces_strength || []).filter((s) => s.promo_id === pid);
-    const orig = Number(p.original_forecast_total || sumOf(allocs, "original_forecast_qty"));
-    const appr = Number(p.approved_forecast_total || sumOf(allocs, "approved_forecast_qty"));
-    const ord = Number(p.ordered_total || sumOf(allocs, "store_ordered_qty"));
-    const sold = Number(p.sold_total || sumOf(allocs, "sold_qty"));
-    const recom = Number(p.store_recommended_total || sumOf(allocs, "store_recommended_qty"));
-    const whR = Number(p.wh_recommended_total || sumOf(whsup, "wh_recommended_qty"));
-    const whO = Number(p.wh_ordered_total || sumOf(whsup, "wh_ordered_qty"));
+    openModal(`<span dir="auto">${esc(p.description)}</span>`, `${esc(p.promo_id)} · ${badge(p.status)}`, spinner);
+    const det = await promoDetail(pid);
+    const allocs = det.allocations || [], whsup = det.wh_supply || [], strength = det.aces_strength || [];
+    const orig = Number(p.original_forecast_total || 0), appr = Number(p.approved_forecast_total || 0);
+    const ord = Number(p.ordered_total || 0), sold = Number(p.sold_total || 0);
+    const recom = Number(p.store_recommended_total || 0);
+    const whR = Number(p.wh_recommended_total || 0), whO = Number(p.wh_ordered_total || 0);
     const trade = Number(p.trade_agreement_qty || 0);
-    const fq = sold > 0 ? Math.round(sold / appr * 100) : null;
-    const adoptS = recom > 0 ? Math.round(ord / recom * 100) : null;
-    const adoptW = whR > 0 ? Math.round(whO / whR * 100) : null;
-    const cover = trade > 0 ? Math.round(appr / trade * 100) : null;
-    const weak = trade > 0 && appr < trade;
+    const fq = fqAcc(sold, appr);
+    const adoptS = recom > 0 ? cap100(Math.round(ord / recom * 100)) : null;
+    const adoptW = whR > 0 ? cap100(Math.round(whO / whR * 100)) : null;
+    const cover = trade > 0 ? cap100(Math.round(appr / trade * 100)) : null;
+    const gap = trade > 0 ? (trade - appr) / trade : 0;
     const maxF = Math.max(orig, appr, trade, ord, sold, 1);
     const bar = (label, val, color) => `<div style="margin:7px 0"><div style="display:flex;justify-content:space-between;font-size:12px"><span>${label}</span><span class="strong">${num(val)}</span></div><div class="bar" style="height:10px"><i style="width:${Math.round(val / maxF * 100)}%;background:${color}"></i></div></div>`;
     const repCat = (allocs[0] && allocs[0].category_name) || (LK.items[p.representing_barcode] && LK.items[p.representing_barcode].dept_lv2_name) || "—";
@@ -1018,18 +1083,36 @@ const DRILL = {
     body += `<h4>חיזוי, הזמנה ומכר (סה"כ)</h4><div class="card" style="background:var(--bg-2)">
       ${bar("חיזוי מקורי (ספק)", orig, "#64748b")}
       ${bar("חיזוי מאושר (מנהל שרשרת)", appr, "#6366f1")}
-      ${trade ? bar("הסכם מסחרי", trade, weak ? "#ef4444" : "#22c55e") : ""}
+      ${trade ? bar("הסכם מסחרי", trade, (gap > 0.10) ? "#ef4444" : "#22c55e") : ""}
       ${ord ? bar("הוזמן מספק (מצטבר)", ord, "#38bdf8") : ""}
       ${sold ? bar("נמכר בפועל", sold, "#22c55e") : ""}</div>`;
-    if (weak) body += `<div class="login-error" style="margin-top:12px">⚠ חיזוי מאושר (${num(appr)}) נמוך מההסכם המסחרי (${num(trade)}) — המבצע חלש מדי לכמות ההסכם. יש לחזק חיזוי/הזמנה או לעדכן את ההסכם.</div>`;
+    if (gap > 0.10) body += `<div class="login-error" style="margin-top:12px">⚠ חיזוי מאושר (${num(appr)}) נמוך מההסכם המסחרי (${num(trade)}) ביותר מ-10% — המבצע חלש מדי לכמות ההסכם.</div>`;
     body += `<h4>מדדי ביצוע</h4><div class="chips">
-      <div class="chip"><div class="c-val">${fq == null ? "—" : fq + "%"}</div><div class="c-lbl">איכות חיזוי (מכר/מאושר)</div></div>
+      <div class="chip"><div class="c-val">${fq == null ? "—" : fq + "%"}</div><div class="c-lbl">איכות חיזוי (דיוק)</div></div>
       <div class="chip"><div class="c-val">${adoptS == null ? "—" : adoptS + "%"}</div><div class="c-lbl">אימוץ סניפים</div></div>
       <div class="chip"><div class="c-val">${adoptW == null ? "—" : adoptW + "%"}</div><div class="c-lbl">אימוץ מחסנים</div></div>
       <div class="chip"><div class="c-val">${cover == null ? "—" : cover + "%"}</div><div class="c-lbl">כיסוי הסכם מסחרי</div></div>
-      <div class="chip"><div class="c-val">${num(p.otif_pct)}%</div><div class="c-lbl">OTIF</div></div>
-      <div class="chip"><div class="c-val">${num(p.availability_pct)}%</div><div class="c-lbl">זמינות</div></div>
+      <div class="chip"><div class="c-val">${cap100(Number(p.otif_pct))}%</div><div class="c-lbl">OTIF</div></div>
+      <div class="chip"><div class="c-val">${cap100(Number(p.availability_pct))}%</div><div class="c-lbl">זמינות</div></div>
       <div class="chip"><div class="c-val">${num(p.shrink_pct)}%</div><div class="c-lbl">פחת</div></div></div>`;
+    const ca = campaignAnalysis(p);
+    body += `<h4>ניתוח קמפיין ו-ROI הסכם מסחרי</h4><div class="chips">
+      <div class="chip"><div class="c-val">${ca.sold ? num(ca.sold) : "—"}</div><div class="c-lbl">מכר בתקופת הקמפיין</div></div>
+      <div class="chip"><div class="c-val">${ca.boost == null ? "—" : (ca.boost > 0 ? "+" : "") + ca.boost + "%"}</div><div class="c-lbl">זינוק מכירות מול שבועיים לפני</div></div>
+      <div class="chip"><div class="c-val">${ca.revUplift == null ? "—" : (ca.revUplift >= 0 ? "+" : "") + money(Math.round(ca.revUplift))}</div><div class="c-lbl">תוספת הכנסה מול שבועיים לפני (כולל הנחה)</div></div>
+      <div class="chip"><div class="c-val">${ca.stockDaysAfter == null ? "—" : ca.stockDaysAfter}</div><div class="c-lbl">ימי מלאי שנותרו לאחר הקמפיין</div></div>
+    </div>
+    <div class="card" style="background:var(--bg-2);margin-top:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px"><span class="strong">הערכת עודף הסכם מסחרי</span><span class="badge ${ca.vtone}">${ca.verdict}</span></div>
+      <div class="card-sub" style="margin:0 0 10px">${ca.phase === "COMPLETED" ? "בהשוואה למכירות בפועל (רטרו)" : "בהשוואה לחיזוי מאושר/מקורי (לפני/במהלך)"} — עודף הסכם יוצר ימי מלאי, פחת ועלויות הובלה מיותרות.</div>
+      <div class="chips">
+        <div class="chip"><div class="c-val">${num(ca.overshoot)}</div><div class="c-lbl">עודף יח' מול ${ca.phase === "COMPLETED" ? "מכר" : "חיזוי"}</div></div>
+        <div class="chip"><div class="c-val">${money(Math.round(ca.storageCost))}</div><div class="c-lbl">עלות אחסון</div></div>
+        <div class="chip"><div class="c-val">${money(Math.round(ca.shrinkCost))}</div><div class="c-lbl">עלות פחת</div></div>
+        <div class="chip"><div class="c-val">${money(Math.round(ca.transportCost))}</div><div class="c-lbl">עלות הובלה</div></div>
+        <div class="chip"><div class="c-val strong">${money(ca.overshootCost)}</div><div class="c-lbl">עלות עודף כוללת</div></div>
+      </div>
+    </div>`;
     if (strength.length) {
       const items = strength.slice().sort((a, b) => Number(b.anchor_tec_forecast_qty) - Number(a.anchor_tec_forecast_qty))
         .map((s) => ({ label: { VERY_DEEP: "עמוק מאוד", DEEP: "עמוק", STRONG: "חזק", MEDIUM: "בינוני" }[s.strength_class] || s.strength_class, value: Number(s.anchor_tec_forecast_qty), color: s.selected_by_user ? "#22c55e" : "#6366f1" }));
@@ -1043,10 +1126,10 @@ const DRILL = {
       { key: "store_recommended_qty", label: "המלצה", num: true, render: (r) => num(r.store_recommended_qty) },
       { key: "store_ordered_qty", label: "הוזמן", num: true, render: (r) => num(r.store_ordered_qty) },
       { key: "sold_qty", label: "נמכר", num: true, render: (r) => r.sold_qty ? num(r.sold_qty) : "—" },
-      { key: "_fq", label: "איכות", num: true, render: (r) => { const s = Number(r.sold_qty || 0), a = Number(r.approved_forecast_qty || 0); const q = s > 0 && a > 0 ? Math.round(s / a * 100) : null; return q == null ? "—" : `<span class="badge ${fqTone(q)}">${q}%</span>`; } },
-      { key: "_ad", label: "אימוץ", num: true, render: (r) => { const o = Number(r.store_ordered_qty || 0), rc = Number(r.store_recommended_qty || 0); const q = rc > 0 ? Math.round(o / rc * 100) : null; return q == null ? "—" : `<span class="badge ${adoptTone(q)}">${q}%</span>`; } },
+      { key: "_fq", label: "איכות", num: true, render: (r) => { const q = fqAcc(Number(r.sold_qty || 0), Number(r.approved_forecast_qty || 0)); return q == null ? "—" : `<span class="badge ${fqTone(q)}">${q}%</span>`; } },
+      { key: "_ad", label: "אימוץ", num: true, render: (r) => { const o = Number(r.store_ordered_qty || 0), rc = Number(r.store_recommended_qty || 0); const q = rc > 0 ? cap100(Math.round(o / rc * 100)) : null; return q == null ? "—" : `<span class="badge ${adoptTone(q)}">${q}%</span>`; } },
     ];
-    body += `<h4>מגוון סניפי (${allocs.length})</h4>` + tableHTML(acols, allocs);
+    body += `<h4>מגוון סניפי — ${num(allocs.length)} שורות (סינתזה מתוך ${num(p.store_count)} סניפים)</h4>` + tableHTML(acols, allocs.slice(0, 300));
     if (whsup.length) {
       const wcols = [
         { key: "warehouse_id", label: "מחסן", render: (r) => "מחסן " + esc(r.warehouse_id) },

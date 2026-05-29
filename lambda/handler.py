@@ -16,6 +16,7 @@ import os
 import time
 
 import boto3
+from boto3.dynamodb.conditions import Key
 
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Prodbug76")
@@ -238,15 +239,80 @@ def ep_central_planner():
 
 
 def ep_promotions():
+    """List endpoint: promo headers + per-item aggregates only (kept small;
+    store-level rows are synthesized on demand in ep_promo_detail)."""
     rows = _rows("promotions")
     return {
         "promotions": [r for r in rows if r.get("record_type") == "promo"],
+        "promo_items": [r for r in rows if r.get("record_type") == "promo_item"],
+        "wh_supply": [r for r in rows if r.get("record_type") == "wh_supply"],
         "aces_strength": [r for r in rows
                           if r.get("record_type") == "aces_strength"],
-        "allocations": [r for r in rows if r.get("record_type") == "allocation"],
-        "wh_supply": [r for r in rows if r.get("record_type") == "wh_supply"],
-        "waves": [r for r in rows if r.get("record_type") == "wh_wave"],
     }
+
+
+_store_cache = None
+
+
+def _store_caps():
+    global _store_cache
+    if _store_cache is None:
+        _store_cache = {}
+        try:
+            for s in _scan_all("stores"):
+                _store_cache[s.get("store_id")] = (
+                    s.get("name"), float(s.get("sale_capability_score") or 0.6))
+        except Exception as exc:  # noqa: BLE001
+            print(f"store cap load failed: {exc}")
+            _store_cache = {}
+    return _store_cache
+
+
+def _jit(seed, lo, hi):
+    h = int(hashlib.md5(seed.encode("utf-8")).hexdigest()[:8], 16) / 0xFFFFFFFF
+    return lo + (hi - lo) * h
+
+
+def ep_promo_detail(pid):
+    """Single promotion: header + item aggregates + WH supply + synthesized
+    per-store allocations (distributed across the promo's stores by capability)."""
+    table = _table(T["promotions"])
+    resp = table.query(KeyConditionExpression=Key("PK").eq(f"PROMO#{pid}"))
+    rows = _clean(resp.get("Items", []))
+    header = next((r for r in rows if r.get("record_type") == "promo"), None)
+    items = [r for r in rows if r.get("record_type") == "promo_item"]
+    wh = [r for r in rows if r.get("record_type") == "wh_supply"]
+    strength = [r for r in rows if r.get("record_type") == "aces_strength"]
+    store_ids = (header or {}).get("store_ids") or []
+    caps = _store_caps()
+    weights = [(s, (caps.get(s) or (s, 0.6))) for s in store_ids]
+    wsum = sum(c[1][1] for c in weights) or 1.0
+    keep = ("format_code", "display_type_code", "category_code", "category_name",
+            "vendor_id", "supply_method", "managing_warehouse_id",
+            "promo_type_code", "phase", "item_desc")
+    allocs = []
+    for it in items:
+        bc = it.get("item_barcode")
+        base = {k: it.get(k) for k in keep}
+        O = float(it.get("original_forecast_qty") or 0)
+        A = float(it.get("approved_forecast_qty") or 0)
+        R = float(it.get("store_recommended_qty") or 0)
+        Od = float(it.get("store_ordered_qty") or 0)
+        S = float(it.get("sold_qty") or 0)
+        for s, (nm, cap) in weights:
+            frac = cap / wsum
+            row = dict(base)
+            row.update(
+                promo_id=pid, store_id=s, store_name=nm, item_barcode=bc,
+                original_forecast_qty=round(O * frac * _jit(f"{pid}{s}{bc}o", 0.85, 1.15)),
+                approved_forecast_qty=round(A * frac),
+                store_recommended_qty=round(R * frac * _jit(f"{pid}{s}{bc}r", 0.9, 1.1)),
+                store_ordered_qty=round(Od * frac * _jit(f"{pid}{s}{bc}d", 0.8, 1.05)),
+                sold_qty=round(S * frac * _jit(f"{pid}{s}{bc}x", 0.6, 1.3)),
+                record_type="allocation")
+            allocs.append(row)
+    return {"header": header, "items": items, "allocations": allocs,
+            "wh_supply": wh, "aces_strength": strength}
 
 
 def ep_cannibalization():
@@ -338,6 +404,15 @@ def handler(event, _context):
             return _resp({"ok": True, "data": ep_central_planner()})
         if path == "/api/promotions":
             return _resp({"ok": True, "data": ep_promotions()})
+        if path == "/api/promo":
+            qs = event.get("queryStringParameters") or {}
+            pid = qs.get("promo_id")
+            if not pid:
+                import urllib.parse
+                pid = urllib.parse.parse_qs(event.get("rawQueryString", "")).get("promo_id", [None])[0]
+            if not pid:
+                return _resp({"ok": False, "error": "missing promo_id"})
+            return _resp({"ok": True, "data": ep_promo_detail(pid)})
         if path == "/api/cannibalization":
             return _resp({"ok": True, "data": ep_cannibalization()})
         if path == "/api/master":
