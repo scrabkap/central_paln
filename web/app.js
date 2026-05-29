@@ -955,6 +955,33 @@ function canFlowSVG(c) {
   if (isLoss) s += `<rect x="${lOuter}" y="${adjBottom}" width="${barW}" height="${Math.max(baseBottom - adjBottom, 0)}" fill="#E5556A" rx="2"/>`;
   return s + `</svg>`;
 }
+/* ---- volume balance waterfall (base → loss → adjusted) ---- */
+function canWaterfall(c) {
+  const W = 300, H = 132, padL = 6, padR = 6, base = 100, bw = 52;
+  const slot = (W - padL - padR) / 3, max = Math.max(c.groupBase, 1);
+  const h = (v) => (v / max) * 80, cx = (i) => padL + slot * i + slot / 2;
+  const baseH = h(c.groupBase), adjH = h(c.groupAdjusted), lossH = baseH - adjH;
+  let s = `<svg viewBox="0 0 ${W} ${H}" class="can-wf-svg" preserveAspectRatio="xMidYMid meet">`;
+  s += `<rect x="${cx(0) - bw / 2}" y="${base - baseH}" width="${bw}" height="${baseH}" rx="3" fill="var(--role-provider)" fill-opacity=".85"/>`;
+  s += `<text x="${cx(0)}" y="${base - baseH - 6}" class="can-wf-num" text-anchor="middle">${num(c.groupBase)}</text>`;
+  s += `<text x="${cx(0)}" y="${base + 15}" class="can-wf-lbl" text-anchor="middle">בסיס</text>`;
+  if (c.loss > 0) {
+    s += `<rect x="${cx(1) - bw / 2}" y="${base - baseH}" width="${bw}" height="${lossH}" rx="3" fill="var(--bad)" fill-opacity=".8"/>`;
+    s += `<text x="${cx(1)}" y="${base - baseH - 6}" class="can-wf-num bad" text-anchor="middle">−${num(c.loss)}</text>`;
+    s += `<text x="${cx(1)}" y="${base + 15}" class="can-wf-lbl" text-anchor="middle">אובדן</text>`;
+    s += `<line x1="${cx(0) + bw / 2}" y1="${base - baseH}" x2="${cx(1) - bw / 2}" y2="${base - baseH}" class="can-wf-conn"/>`;
+    s += `<line x1="${cx(1) + bw / 2}" y1="${base - adjH}" x2="${cx(2) - bw / 2}" y2="${base - adjH}" class="can-wf-conn"/>`;
+  } else {
+    s += `<text x="${cx(1)}" y="${base - 38}" class="can-wf-keep" text-anchor="middle">נפח נשמר</text>`;
+    s += `<text x="${cx(1)}" y="${base - 23}" class="can-wf-keep" text-anchor="middle">ללא אובדן</text>`;
+    s += `<line x1="${cx(0) + bw / 2}" y1="${base - baseH}" x2="${cx(2) - bw / 2}" y2="${base - adjH}" class="can-wf-conn"/>`;
+  }
+  s += `<rect x="${cx(2) - bw / 2}" y="${base - adjH}" width="${bw}" height="${adjH}" rx="3" fill="var(--role-approved)" fill-opacity=".9"/>`;
+  s += `<text x="${cx(2)}" y="${base - adjH - 6}" class="can-wf-num appr" text-anchor="middle">${num(c.groupAdjusted)}</text>`;
+  s += `<text x="${cx(2)}" y="${base + 15}" class="can-wf-lbl" text-anchor="middle">מתואם</text>`;
+  s += `<line x1="${padL}" y1="${base}" x2="${W - padR}" y2="${base}" class="can-wf-base"/>`;
+  return s + `</svg>`;
+}
 
 PAGES.cannibalization = async () => {
   const d = await load("/api/cannibalization");
@@ -1079,29 +1106,30 @@ function drawCanEditor(view) {
   const totWh = c.members.reduce((a, m) => a + Number(m.whStock || 0), 0);
   const totStore = c.members.reduce((a, m) => a + Number(m.storeStock || 0), 0);
 
-  const editor = `<div class="card-head" style="margin-top:2px"><div><h3>חלוקת השפעה בין הפריטים</h3>
-      <div class="card-sub" style="margin:0">גרור את ההשפעה לשינוי חלוקת החיזוי — הכל מתעדכן מיידית.${isBD ? " הנפח הכולל נשמר; אתה רק מעביר נפח בין הספקים." : ""}</div></div>
-      <button class="btn btn-ghost" style="width:auto" data-canequal>⚖ חלוקה שווה</button></div>
-    <div class="can-split" id="can-split-preview" style="height:12px;margin:2px 0 14px">${canSplit(c)}</div>
-    <div class="table-wrap"><table class="data can-members"><thead><tr>
+  const memTable = `<div class="table-wrap"><table class="data can-members"><thead><tr>
       <th>פריט · ספק</th><th class="num">חיזוי בסיס</th><th>השפעה (חלק בקבוצה)</th><th class="num">חיזוי מתואם</th><th class="num">דלתא מול בסיס</th><th class="num">מלאי מחסן</th><th class="num">מלאי סניפים</th><th style="text-align:center">נעול להזמנה</th>
     </tr></thead><tbody>${memRows}</tbody><tfoot><tr>
       <td class="strong">סה"כ</td><td class="num role-num provider">${num(c.groupBase)}</td><td></td>
       <td class="num role-num approved" id="can-group-adj">${num(c.groupAdjusted)}</td>
       <td class="num strong" id="can-group-loss" style="color:var(--state-bad)">${c.loss > 0 ? "−" + num(c.loss) : "—"}</td>
       <td class="num">${num(totWh)}</td><td class="num">${num(totStore)}</td><td></td>
-    </tr></tfoot></table></div>
-    <div class="mut" style="font-size:11.5px;margin-top:8px">🔒 נעילה להזמנה נשמרת על המגוון (assortment) ברמת הפורמט — חוסמת הזמנות לפריט אך אינה משפיעה על חישוב החיזוי. מלאי מחסן/סניפים מוצג לסיוע בתכנון ההחלפה ההדרגתית.</div>`;
+    </tr></tfoot></table></div>`;
 
   const fmts = (state._master && state._master.formats) || [];
   const fmtChips = fmts.map((f) => `<span class="can-fmt ${w.formats.includes(f.format_code) ? "on" : ""}" data-canfmt="${esc(f.format_code)}">${esc(f.description)}</span>`).join("");
-  const replaceZone = isBD ? "" : `<div class="pd-zone"><div class="pd-zone-title">תכנון החלפה הדרגתית</div>
-    <div class="can-rate-wrap">
-      <p class="mut" style="margin:0;font-size:13px;line-height:1.75">הפריטים מתחרים ומכרסמים זה בנפח של זה. <b style="color:var(--text)">הורד את ההשפעה</b> של הפריט שברצונך להוציא — החיזוי שלו יירד, ומלאי המחסן והסניפים יתרוקן בהדרגה עד שיוחלף בפריט המתחרה. אם בעתיד ספק יחזור עם מחיר קנייה טוב יותר — <b style="color:var(--text)">העלה את ההשפעה</b> בחזרה וקבל אותו מחדש לתמהיל.</p>
-      <label class="can-lbl">עומק קניבליזציה — חלק מהביקוש המשותף שנגרע עקב החפיפה</label>
-      <div class="can-rate-row"><input type="range" min="0" max="50" value="${Math.round(c.rate * 100)}" data-canrate><span class="can-rate-val" id="can-rate-val">${Math.round(c.rate * 100)}%</span></div>
-      <div class="mut" style="font-size:12px">אובדן נפח נוכחי: <b id="can-rate-loss" style="color:var(--state-bad)">−${num(c.loss)}</b> מתוך ${num(c.groupBase)} בסיס.</div>
-      <label class="can-lbl" style="margin-top:16px">החל את התוכנית ברמת פורמט — היכן ההחלפה נכנסת לתוקף</label>
+  // right-hand side panel beside the flow: waterfall + (competing) the cannib-depth control / (by-design) a note
+  const sidePanel = `<div class="can-side">
+    <div class="can-side-card"><div class="can-side-title">מאזן נפח</div><div id="can-wf">${canWaterfall(c)}</div></div>
+    ${isBD
+      ? `<div class="can-side-card"><div class="can-side-title">נפח אספקה</div><div class="bd-badge" style="margin:0 0 6px">נפח נשמר 100%</div><p class="mut" style="margin:0;font-size:12px;line-height:1.6">עץ מתוכנן — הנפח הכולל נשמר. גרירת ההשפעה מעבירה נפח בין הספקים (למשל לכיסוי מחסור), ללא אובדן.</p></div>`
+      : `<div class="can-side-card"><div class="can-side-title">עומק קניבליזציה</div>
+          <div class="can-rate-row"><input type="range" min="0" max="50" value="${Math.round(c.rate * 100)}" data-canrate><span class="can-rate-val" id="can-rate-val">${Math.round(c.rate * 100)}%</span></div>
+          <div class="mut" style="font-size:11.5px;line-height:1.5">חלק מהביקוש המשותף שנגרע עקב החפיפה. אובדן נוכחי: <b id="can-rate-loss" style="color:var(--state-bad)">−${num(c.loss)}</b>.</div></div>`}
+  </div>`;
+
+  const fmtZone = isBD ? "" : `<div class="pd-zone"><div class="pd-zone-title">תכנון החלפה הדרגתית — רמת פורמט</div>
+    <div class="can-fmt-zone">
+      <p class="mut" style="margin:0;font-size:12.5px;line-height:1.65;flex:1;min-width:240px"><b style="color:var(--text)">הורד</b> את ההשפעה של הפריט שברצונך להוציא — חיזויו יירד ומלאי המחסן/סניפים יתרוקן בהדרגה עד החלפה. אם ספק יחזור עם מחיר טוב יותר — <b style="color:var(--text)">העלה</b> בחזרה. בחר היכן התוכנית חלה:</p>
       <div class="can-fmts">${fmtChips || '<span class="mut">אין פורמטים</span>'}</div>
     </div></div>`;
 
@@ -1120,13 +1148,17 @@ function drawCanEditor(view) {
       <h2><span dir="auto">${esc(w.notes || w.tree_id)}</span> ${typePill} ${statusPill}</h2>
       <div class="pd-meta"><span dir="auto">${esc(canVendors(w))}</span><span class="sep">·</span>${w.members.length} פריטים<span class="sep">·</span><span class="num">${esc(w.tree_id)}</span>${w.source_suggestion_id ? `<span class="sep">·</span>מקור: ${esc(w.source_suggestion_id)}` : ""}</div></div>
     <div class="pd-zone"><div class="pd-zone-title">חלוקת החיזוי — מהבסיס אל הפריטים${isBD ? "" : ", וכמה נגרע בדרך"}</div>
-      <div class="can-flow-host" id="can-flow">${canFlowSVG(c)}</div></div>
-    <div class="pd-zone"><div class="pd-zone-title">עורך החלוקה</div>${editor}</div>
-    ${replaceZone}
+      <div class="can-top-grid">
+        <div class="can-flow-host" id="can-flow">${canFlowSVG(c)}</div>
+        ${sidePanel}
+      </div></div>
+    <div class="pd-zone"><div class="card-head" style="margin-bottom:8px"><div><div class="pd-zone-title" style="margin:0">עורך החלוקה</div></div>
+        <button class="btn btn-ghost" style="width:auto" data-canequal>⚖ חלוקה שווה</button></div>
+      ${memTable}
+      <div class="mut" style="font-size:11.5px;margin-top:8px">🔒 נעילה להזמנה נשמרת על המגוון (assortment) ברמת הפורמט — חוסמת הזמנות לפריט אך אינה משפיעה על חישוב החיזוי. מלאי מחסן/סניפים מוצג לסיוע בתכנון ההחלפה.</div></div>
+    ${fmtZone}
     <div class="pd-zone"><div class="pd-zone-title">בריאות ההחלטה</div><div class="health-grid ace-health" id="can-health">${canHealth(c)}</div></div>
-    <div class="pd-zone"><div class="pd-zone-title">השפעה תפעולית</div>
-      <p class="mut" style="font-size:13px;line-height:1.75;margin:0">בעת אישור — המבצעים המכילים פריטים מהעץ יחושבו מחדש, ו-MRP מחסן וסניף יורצו מחדש באצווה הלילית לפי החלוקה החדשה. כל שינוי נרשם בלוג הפעילות.</p></div>
-    <div class="ace-actions">${decisions}</div>`;
+    <div class="ace-actions">${decisions}<span class="mut" style="font-size:11.5px;align-self:center;flex:1;min-width:200px">בעת אישור — המבצעים המושפעים ו-MRP מחסן/סניף יורצו מחדש באצווה הלילית.</span></div>`;
   attachCanHandlers(view);
 }
 
@@ -1150,8 +1182,8 @@ function canRefreshLive(view) {
     const aj = view.querySelector("#can-adj-" + m.i); if (aj) aj.textContent = num(m.adjusted);
     const dl = view.querySelector("#can-delta-" + m.i); if (dl) dl.innerHTML = canDelta(m.delta);
   });
-  const sp = view.querySelector("#can-split-preview"); if (sp) sp.innerHTML = canSplit(c);
   const fh = view.querySelector("#can-flow"); if (fh) fh.innerHTML = canFlowSVG(c);
+  const wf = view.querySelector("#can-wf"); if (wf) wf.innerHTML = canWaterfall(c);
   const ga = view.querySelector("#can-group-adj"); if (ga) ga.textContent = num(c.groupAdjusted);
   const gl = view.querySelector("#can-group-loss"); if (gl) gl.textContent = c.loss > 0 ? "−" + num(c.loss) : "—";
   const rl = view.querySelector("#can-rate-loss"); if (rl) rl.textContent = "−" + num(c.loss);
@@ -2093,7 +2125,8 @@ function renderShell() {
       <aside class="sidebar">
         <div class="brand">
           <div class="brand-logo">${logoSVG()}</div>
-          <div><h1>Central Planner</h1><div class="sub">מרכז תכנון תפעולי</div></div>
+          <div class="brand-text"><h1>Central Planner</h1><div class="sub">מרכז תכנון תפעולי</div></div>
+          <button class="sidebar-toggle" id="sidebar-toggle" title="כווץ/הרחב תפריט">⇤</button>
         </div>
         ${nav}
         <div class="nav-spacer"></div>
@@ -2212,6 +2245,9 @@ document.addEventListener("click", (e) => {
     const c = document.querySelector("#promo-drill-tree");
     if (c) c.innerHTML = renderDrillTree(state._promoDrillAllocs);
     return;
+  }
+  if (e.target.closest("#sidebar-toggle")) {
+    document.querySelector(".shell").classList.toggle("nav-collapsed"); return;
   }
   const nav = e.target.closest(".nav-item");
   if (nav) { navigate(nav.dataset.route); return; }
