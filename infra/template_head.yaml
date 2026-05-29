@@ -138,7 +138,7 @@ Resources:
       FunctionUrlAuthType: NONE
 
   # ============================================================
-  # CloudFront distribution (S3 static + Lambda API behind /api/*)
+  # CloudFront distribution (serves the SPA; API is the Lambda Function URL)
   # ============================================================
   CloudFrontDistribution:
     Type: AWS::CloudFront::Distribution
@@ -155,34 +155,12 @@ Resources:
             OriginAccessControlId: !GetAtt CloudFrontOAC.Id
             S3OriginConfig:
               OriginAccessIdentity: ''
-          - Id: lambda-api
-            DomainName: !Select [2, !Split ['/', !GetAtt ApiFunctionUrl.FunctionUrl]]
-            CustomOriginConfig:
-              OriginProtocolPolicy: https-only
-              OriginSSLProtocols:
-                - TLSv1.2
         DefaultCacheBehavior:
           TargetOriginId: s3-web
           ViewerProtocolPolicy: redirect-to-https
           Compress: true
           AllowedMethods: [GET, HEAD, OPTIONS]
           CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
-        CacheBehaviors:
-          - PathPattern: /api/*
-            TargetOriginId: lambda-api
-            ViewerProtocolPolicy: redirect-to-https
-            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
-            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
-            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
-        CustomErrorResponses:
-          - ErrorCode: 403
-            ResponseCode: 200
-            ResponsePagePath: /index.html
-            ErrorCachingMinTTL: 0
-          - ErrorCode: 404
-            ResponseCode: 200
-            ResponsePagePath: /index.html
-            ErrorCachingMinTTL: 0
         ViewerCertificate:
           CloudFrontDefaultCertificate: true
 
@@ -197,5 +175,5 @@ Outputs:
     Description: CloudFront distribution id (for cache invalidation)
     Value: !Ref CloudFrontDistribution
   ApiFunctionUrl:
-    Description: Raw Lambda Function URL (fronted by CloudFront /api/*)
+    Description: Lambda Function URL (the API; the SPA calls this directly via CORS)
     Value: !GetAtt ApiFunctionUrl.FunctionUrl

@@ -113,6 +113,14 @@ jobs:
           echo "web_bucket=$(get WebBucketName)" >> "$GITHUB_OUTPUT"
           echo "dist_id=$(get DistributionId)" >> "$GITHUB_OUTPUT"
           echo "url=$(get CloudFrontURL)" >> "$GITHUB_OUTPUT"
+          echo "api_url=$(get ApiFunctionUrl)" >> "$GITHUB_OUTPUT"
+
+      - name: Inject API URL into the SPA
+        run: |
+          API="${{ steps.out.outputs.api_url }}"
+          API="${API%/}"   # strip trailing slash
+          printf 'window.CP_API=%s;\n' "\"$API\"" > web/config.js
+          echo "config.js -> $(cat web/config.js)"
 
       - name: Upload SPA to S3
         run: |
@@ -131,27 +139,35 @@ jobs:
             --distribution-id "${{ steps.out.outputs.dist_id }}" \
             --paths "/*" >/dev/null
 
-      - name: Smoke test login through CloudFront
+      - name: Smoke test the API (Function URL) and the SPA (CloudFront)
         run: |
-          URL="${{ steps.out.outputs.url }}"
-          echo "POST $URL/api/login"
-          RESP=$(curl -s -m 30 -X POST "$URL/api/login" \
+          API="${{ steps.out.outputs.api_url }}"; API="${API%/}"
+          CF="${{ steps.out.outputs.url }}"
+          echo "API=$API"; echo "CF=$CF"
+          # 1) login directly against the Function URL (this is what the SPA calls)
+          echo "== POST $API/api/login =="
+          CODE=$(curl -s -o /tmp/login.json -w '%{http_code}' -m 30 -X POST "$API/api/login" \
             -H 'content-type: application/json' \
             -d '{"username":"admin","password":"Prodbug76"}')
-          echo "response: $RESP"
-          echo "$RESP" | grep -q '"ok": *true' || { echo "::error::login returned ok!=true — login is broken"; exit 1; }
-          echo "$RESP" | grep -q '"token"'      || { echo "::error::login response has no token"; exit 1; }
-          # also verify a stale client (doubled /api) still works
-          RESP2=$(curl -s -m 30 -X POST "$URL/api/api/login" \
-            -H 'content-type: application/json' \
-            -d '{"username":"admin","password":"Prodbug76"}')
-          echo "stale-path response: $RESP2"
-          echo "$RESP2" | grep -q '"ok": *true' || echo "::warning::stale /api/api path not normalized"
-          # confirm a data route works with the issued token
-          TOKEN=$(printf '%s' "$RESP" | sed -n 's/.*"token": *"\([^"]*\)".*/\1/p')
-          OV=$(curl -s -m 30 "$URL/api/overview" -H "authorization: Bearer $TOKEN")
-          echo "overview ok: $(printf '%s' "$OV" | grep -o '"ok": *[a-z]*' | head -1)"
-          echo "Login smoke test passed."
+          echo "http=$CODE body=$(cat /tmp/login.json)"
+          [ "$CODE" = "200" ] || { echo "::error::Function URL login HTTP $CODE"; exit 1; }
+          grep -q '"ok": *true' /tmp/login.json || { echo "::error::login ok!=true"; exit 1; }
+          grep -q '"token"'      /tmp/login.json || { echo "::error::no token"; exit 1; }
+          # 2) CORS preflight must succeed (browser sends this cross-origin)
+          echo "== OPTIONS preflight =="
+          curl -s -i -m 30 -X OPTIONS "$API/api/login" \
+            -H "Origin: $CF" -H 'Access-Control-Request-Method: POST' \
+            -H 'Access-Control-Request-Headers: content-type' | grep -i 'access-control-allow-origin' \
+            || echo "::warning::no CORS header on preflight"
+          # 3) data route with the issued token
+          TOKEN=$(sed -n 's/.*"token": *"\([^"]*\)".*/\1/p' /tmp/login.json)
+          OVCODE=$(curl -s -o /tmp/ov.json -w '%{http_code}' -m 30 "$API/api/overview" -H "authorization: Bearer $TOKEN")
+          echo "overview http=$OVCODE ok=$(grep -o '"ok": *[a-z]*' /tmp/ov.json | head -1)"
+          # 4) the SPA loads with the API URL injected
+          echo "== GET $CF (SPA) =="
+          curl -s -m 30 "$CF/config.js"; echo
+          curl -s -m 30 "$CF/" | grep -q 'id="app"' && echo "SPA index served OK"
+          echo "Smoke test passed."
 
       - name: Summary
         run: |

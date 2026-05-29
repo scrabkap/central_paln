@@ -3,7 +3,11 @@
    ============================================================ */
 "use strict";
 
-const API = ""; // paths already include the /api prefix (served same-origin via CloudFront)
+// API base is the Lambda Function URL, injected at deploy time via config.js
+// (window.CP_API). Paths below already include the /api prefix.
+const API = (typeof window !== "undefined" && window.CP_API
+  ? String(window.CP_API).replace(/\/+$/, "")
+  : "");
 const state = {
   token: localStorage.getItem("cp_token") || "",
   user: localStorage.getItem("cp_user") || "",
