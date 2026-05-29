@@ -527,116 +527,187 @@ def build_forecast():
 # promotions (regular + ACES)
 # --------------------------------------------------------------------------
 def build_promotions():
-    # ---- regular universe promos ----
-    regs = [
-        ("PROMO-2001", "אטריות מנת השף 2+1", "8", "Z137", "Y003",
-         "7290117267004", "GRP_NOODLE", 4.50, 2.90, "WAVES"),
-        ("PROMO-2002", "יוגורט פרי - מבצע קיץ", "8", "Z169", "Y003",
-         "7290000220017", "GRP_YOG", 5.90, 3.90, "WAVES"),
-        ("PROMO-2003", "קוקה-קולה 1.5 ליטר מבצע סופ\"ש", "2", "Z190", "Y004",
-         "7290000550018", None, 7.90, 5.00, "SINGLE_SHOT"),
-    ]
-    for (pid, desc, fmt, disp, ptype, rep, grp, cat, price, wave) in regs:
-        start = TODAY + dt.timedelta(days=7)
-        end = start + dt.timedelta(days=21)
-        promo_meta(pid, "REGULAR_UNIVERSE", fmt, disp, ptype, rep, grp, desc,
-                   cat, price, start, end, wave, "WAITING_DISTRIBUTION",
-                   trade_qty=20000, anchor=round(random.uniform(30000, 80000)))
-        promo_allocations(pid, rep, grp, start)
-        promo_waves(pid, wave, start)
+    plan = (["COMPLETED"] * 4 + ["ONGOING"] * 3
+            + ["UPCOMING_SOON"] * 7 + ["UPCOMING_LATER"] * 3)
+    reps = [it for it in ITEMS if not (it[4] and it[4] != it[0])]
+    for idx, phase in enumerate(plan):
+        rep = reps[idx % len(reps)]
+        bc, grp, supply = rep[0], rep[5], rep[6]
+        fmt = PROMO_FORMATS[idx % len(PROMO_FORMATS)]
+        disp = PROMO_DISPLAY_CODES[idx % len(PROMO_DISPLAY_CODES)]
+        ptype = PROMO_TYPES[idx % len(PROMO_TYPES)][0]
+        cat = round(random.uniform(5, 28), 2)
+        price = round(cat * (1 - random.choice([0.15, 0.2, 0.25, 0.3, 0.33, 0.4, 0.5])), 2)
+        start, end = _promo_dates(phase, idx)
+        members = ([m[0] for m in ITEMS if m[5] == grp] or [bc])[:3] if grp else [bc]
+        stores = _stores_for_format(fmt)
+        managing_wh = WH_OF_ITEM.get(bc) if supply == "WH" else None
+        pid = f"PROMO-{2001 + idx}"
+        agg = _alloc_block(pid, fmt, disp, ptype, members, stores, phase, start)
+        trade = round(agg["appr"] * random.choice([0.7, 0.85, 0.95, 1.15, 1.35]))
+        _write_promo(pid, "REGULAR_UNIVERSE", fmt, disp, ptype, bc, grp,
+                     cat, price, start, end, phase, agg, trade, managing_wh)
 
-    # ---- ACES promos (last-minute, price unknown) ----
-    aces = [
-        ("PROMO-3001", "ACES שוקולד פרה - מבצע בזק", "8", "7290000440017", "901310"),
-        ("PROMO-3002", "ACES נייר טואלט לילי - מבצע פתע", "4", "7290000660019", "901733"),
-    ]
-    for (pid, desc, fmt, rep, ven) in aces:
-        start = TODAY + dt.timedelta(days=3)
-        end = start + dt.timedelta(days=10)
-        promo_meta(pid, "ACES", fmt, None, None, rep, None, desc,
-                   None, None, start, end, "WAVES", "WAITING_QC",
-                   trade_qty=15000, anchor=None)
-        # strength scale forecasts
-        scales = [("VERY_DEEP", 120000, False), ("DEEP", 90000, True),
-                  ("STRONG", 60000, False), ("MEDIUM", 35000, False)]
-        for cls, qty, sel in scales:
+    # ---- ACES (secondary: last-minute, price unknown, strength scale) ----
+    for j, phase in enumerate(["UPCOMING_SOON", "ONGOING"]):
+        rep = reps[(j + 2) % len(reps)]
+        bc, grp, supply = rep[0], rep[5], rep[6]
+        fmt = PROMO_FORMATS[(j + 1) % len(PROMO_FORMATS)]
+        disp = PROMO_DISPLAY_CODES[(j + 3) % len(PROMO_DISPLAY_CODES)]
+        start, end = _promo_dates(phase, j)
+        stores = _stores_for_format(fmt)
+        managing_wh = WH_OF_ITEM.get(bc) if supply == "WH" else None
+        pid = f"PROMO-{3001 + j}"
+        agg = _alloc_block(pid, fmt, disp, None, [bc], stores, phase, start)
+        trade = round(agg["appr"] * random.choice([0.9, 1.2]))
+        _write_promo(pid, "ACES", fmt, disp, None, bc, grp, None, None,
+                     start, end, phase, agg, trade, managing_wh)
+        for cls, mult, sel in [("VERY_DEEP", 1.6, False), ("DEEP", 1.25, True),
+                               ("STRONG", 1.0, False), ("MEDIUM", 0.7, False)]:
             put("promotions", {
                 "PK": f"PROMO#{pid}", "SK": f"ACES_STRENGTH#{cls}",
                 "promo_id": pid, "strength_class": cls,
-                "anchor_tec_forecast_qty": d(qty + random.randint(-3000, 3000)),
+                "anchor_tec_forecast_qty": d(round(agg["appr"] * mult)),
                 "selected_by_user": sel, "record_type": "aces_strength",
             })
-        promo_allocations(pid, rep, None, start, aces=True)
-        promo_waves(pid, "WAVES", start)
 
 
-def promo_meta(pid, atype, fmt, disp, ptype, rep, grp, desc, cat, price,
-               start, end, wave, status, trade_qty, anchor):
-    row = {
+PROMO_TYPES = [
+    ("Y003", "אחוז הנחה"), ("Y001", "מחיר קבוע"), ("Y004", "הנחה כספית"),
+    ("Y007", "מתנה"), ("Y010", "מדיה"), ("Y011", "כפולה"),
+]
+PROMO_TYPE_HE = dict(PROMO_TYPES)
+PROMO_DISPLAY_CODES = ["Z137", "Z169", "Z170", "Z190", "Z240",
+                       "Z186", "Z193", "Z210", "Z000", "Z221"]
+PROMO_FORMATS = ["8", "2", "7", "6", "4", "8", "2"]
+
+
+def _promo_dates(phase, i):
+    if phase == "COMPLETED":
+        s = TODAY - dt.timedelta(days=26 - i * 3)
+        return s, s + dt.timedelta(days=12)
+    if phase == "ONGOING":
+        s = TODAY - dt.timedelta(days=3 + (i % 3) * 2)
+        return s, TODAY + dt.timedelta(days=8 - (i % 3))
+    if phase == "UPCOMING_SOON":
+        s = TODAY + dt.timedelta(days=2 + (i % 7) * 2)
+        return s, s + dt.timedelta(days=14)
+    s = TODAY + dt.timedelta(days=18 + (i % 3) * 4)
+    return s, s + dt.timedelta(days=14)
+
+
+def _stores_for_format(fmt, k=6):
+    pool = [s for s in STORES if s[2] == fmt] or STORES[:k]
+    return pool[:k]
+
+
+def _promo_status(phase):
+    return {
+        "COMPLETED": "DISTRIBUTED", "ONGOING": "DISTRIBUTED",
+        "UPCOMING_SOON": "WAITING_DISTRIBUTION", "UPCOMING_LATER": "WAITING_QC",
+    }[phase]
+
+
+def _alloc_block(pid, fmt, disp, ptype, members, stores, phase, start):
+    ordering = phase in ("COMPLETED", "ONGOING", "UPCOMING_SOON")
+    has_sales = phase in ("COMPLETED", "ONGOING")
+    progress = {"COMPLETED": 1.0,
+                "ONGOING": round(random.uniform(0.45, 0.7), 2)}.get(phase, 0.0)
+    agg = {"orig": 0, "appr": 0, "ord": 0, "sold": 0, "recom": 0,
+           "wh_recom": 0, "wh_ord": 0, "stores": set()}
+    per_item_recom = {}
+    for (sid, sname, sfmt, size, capv) in stores:
+        cap = float(capv)
+        for mbc in members:
+            info = ITEM_BY_BARCODE[mbc]
+            mven, msupply = info[3], info[6]
+            mwh = WH_OF_ITEM.get(mbc) if msupply == "WH" else None
+            orig = round(random.uniform(60, 380) * cap)
+            appr = round(orig * random.uniform(0.85, 1.18))
+            recom = round(appr * random.uniform(0.9, 1.08))
+            ordered = round(recom * random.uniform(0.7, 1.05)) if ordering else 0
+            sold = round(appr * random.uniform(0.6, 1.3) * progress) if has_sales else 0
+            agg["orig"] += orig
+            agg["appr"] += appr
+            agg["ord"] += ordered
+            agg["sold"] += sold
+            agg["recom"] += recom
+            agg["stores"].add(sid)
+            per_item_recom[mbc] = per_item_recom.get(mbc, 0) + recom
+            put("promotions", {
+                "PK": f"PROMO#{pid}", "SK": f"ALLOC#STORE#{sid}#ITEM#{mbc}",
+                "promo_id": pid, "store_id": sid, "store_name": sname,
+                "format_code": fmt, "display_type_code": disp,
+                "item_barcode": mbc, "item_desc": info[1],
+                "vendor_id": mven, "supply_method": msupply,
+                "managing_warehouse_id": mwh, "promo_type_code": ptype,
+                "phase": phase,
+                "original_forecast_qty": d(orig),
+                "approved_forecast_qty": d(appr),
+                "store_recommended_qty": d(recom),
+                "store_ordered_qty": d(ordered),
+                "sold_qty": d(sold),
+                "record_type": "allocation",
+                "GSI3PK": f"STORE#{sid}#ITEM#{mbc}",
+                "GSI3SK": f"START#{iso(start)}#PROMO#{pid}",
+            })
+    for mbc in members:
+        info = ITEM_BY_BARCODE[mbc]
+        if info[6] != "WH":
+            continue
+        mwh = WH_OF_ITEM.get(mbc, "6000")
+        wh_recom = round(per_item_recom.get(mbc, 0) * random.uniform(1.0, 1.15))
+        wh_ord = round(wh_recom * random.uniform(0.75, 1.05)) if ordering else 0
+        agg["wh_recom"] += wh_recom
+        agg["wh_ord"] += wh_ord
+        put("promotions", {
+            "PK": f"PROMO#{pid}", "SK": f"WHSUP#{mwh}#ITEM#{mbc}",
+            "promo_id": pid, "warehouse_id": mwh, "item_barcode": mbc,
+            "item_desc": info[1], "vendor_id": info[3],
+            "wh_recommended_qty": d(wh_recom), "wh_ordered_qty": d(wh_ord),
+            "record_type": "wh_supply",
+        })
+    return agg
+
+
+def _write_promo(pid, atype, fmt, disp, ptype, rep_bc, grp, cat, price,
+                 start, end, phase, agg, trade, managing_wh):
+    disc = round((1 - price / cat) * 100, 1) if (cat and price) else None
+    status = _promo_status(phase)
+    desc = (f"{ITEM_BY_BARCODE[rep_bc][1]} — {PROMO_TYPE_HE.get(ptype, 'מבצע')}"
+            if atype == "REGULAR_UNIVERSE"
+            else f"ACES {ITEM_BY_BARCODE[rep_bc][1]}")
+    put("promotions", {
         "PK": f"PROMO#{pid}", "SK": "METADATA", "promo_id": pid,
         "activity_type": atype, "format_code": fmt, "display_type_code": disp,
         "promo_type_code": ptype, "is_newspaper": disp == "Z000",
         "loyalty_segment_code": random.choice(["000", "001", "002"]),
-        "coupon_required": atype == "ACES", "representing_barcode": rep,
-        "item_group_code": grp, "description": desc,
+        "coupon_required": atype == "ACES",
+        "representing_barcode": rep_bc, "item_group_code": grp,
+        "description": desc,
         "sap_action_number": f"AKT{random.randint(100000, 999999)}",
         "campaign_code": f"CMP-{random.randint(2000, 2999)}",
-        "reward_code": ptype, "catalog_price": d(cat) if cat else None,
+        "catalog_price": d(cat) if cat else None,
         "promo_price": d(price) if price is not None else None,
-        "gift_pma_qty": 0, "start_date": iso(start), "end_date": iso(end),
-        "trade_agreement_qty": d(trade_qty),
-        "store_count": random.randint(40, 220),
-        "forecast_anchor_tec_qty": d(anchor) if anchor else None,
-        "status": status, "wave_strategy": wave, "record_type": "promo",
+        "discount_pct": d(disc) if disc is not None else None,
+        "start_date": iso(start), "end_date": iso(end), "phase": phase,
+        "vendor_id": ITEM_BY_BARCODE[rep_bc][3],
+        "managing_warehouse_id": managing_wh,
+        "trade_agreement_qty": d(trade), "store_count": len(agg["stores"]),
+        "original_forecast_total": d(agg["orig"]),
+        "approved_forecast_total": d(agg["appr"]),
+        "ordered_total": d(agg["ord"]), "sold_total": d(agg["sold"]),
+        "store_recommended_total": d(agg["recom"]),
+        "wh_recommended_total": d(agg["wh_recom"]),
+        "wh_ordered_total": d(agg["wh_ord"]),
+        "otif_pct": d(random.randint(82, 99)),
+        "availability_pct": d(random.randint(90, 99)),
+        "shrink_pct": d(round(random.uniform(1.0, 4.0), 1)),
+        "status": status, "wave_strategy": "WAVES", "record_type": "promo",
         "GSI1PK": f"STATUS#{status}", "GSI1SK": f"START#{iso(start)}#PROMO#{pid}",
         "GSI2PK": f"FORMAT#{fmt}", "GSI2SK": f"START#{iso(start)}#PROMO#{pid}",
-        "GSI4PK": f"REP_BARCODE#{rep}", "GSI4SK": f"START#{iso(start)}#PROMO#{pid}",
-    }
-    put("promotions", row)
-
-
-def promo_allocations(pid, rep, grp, start, aces=False):
-    members = [rep]
-    if grp:
-        members = [it[0] for it in ITEMS if it[5] == grp] or [rep]
-    for sid, name, fmt, size, cap in STORES[:7]:
-        for bc in members:
-            supply = ITEM_BY_BARCODE.get(bc, (None,)*7)[6] or "WH"
-            ven = ITEM_BY_BARCODE.get(bc, (None,)*7)[3]
-            src = WH_OF_ITEM.get(bc, "6000") if supply == "WH" else ven
-            alloc = round(random.uniform(50, 400) * cap)
-            row = {
-                "PK": f"PROMO#{pid}", "SK": f"ALLOC#STORE#{sid}#ITEM#{bc}",
-                "promo_id": pid, "store_id": sid, "store_name": name,
-                "item_barcode": bc, "item_desc": ITEM_BY_BARCODE.get(bc, ("", "?"))[1],
-                "supply_method": supply, "supply_source_id": src,
-                "original_vendor_id": ven, "display_type_code": "Z137",
-                "allocated_qty_base": d(alloc),
-                "ordered_qty_base": d(round(alloc * random.uniform(0.8, 1.0))),
-                "sold_qty_base": d(round(alloc * random.uniform(0.4, 0.9))),
-                "forecast_anchor_tec_qty": d(round(alloc * 1.1)),
-                "record_type": "allocation",
-                "GSI3PK": f"STORE#{sid}#ITEM#{bc}",
-                "GSI3SK": f"START#{iso(start)}#PROMO#{pid}",
-            }
-            put("promotions", row)
-
-
-def promo_waves(pid, wave, start):
-    n = 1 if wave == "SINGLE_SHOT" else 3
-    for wh, _ in WAREHOUSES[:2]:
-        for w in range(1, n + 1):
-            arrival = start - dt.timedelta(days=(n - w) * 3 + 2)
-            status = ["RECEIVED", "ORDERED", "PLANNED"][min(w - 1, 2)]
-            put("promotions", {
-                "PK": f"PROMO#{pid}", "SK": f"WH_WAVE#{wh}#WAVE#{w:02d}",
-                "promo_id": pid, "warehouse_id": wh, "wave_no": w,
-                "target_qty_base": d(round(random.uniform(5000, 30000) / n)),
-                "planned_arrival_date": iso(arrival),
-                "actual_arrival_date": iso(arrival) if status == "RECEIVED" else None,
-                "status": status, "linked_po_id": f"PO-WH-{pid[-4:]}-{w}",
-                "record_type": "wh_wave",
-            })
+        "GSI4PK": f"REP_BARCODE#{rep_bc}", "GSI4SK": f"START#{iso(start)}#PROMO#{pid}",
+    })
 
 
 # --------------------------------------------------------------------------
@@ -919,12 +990,26 @@ def validate():
     return total, problems
 
 
+def _purge(table):
+    with table.batch_writer() as bw:
+        kwargs = {"ProjectionExpression": "PK, SK"}
+        while True:
+            resp = table.scan(**kwargs)
+            for it in resp.get("Items", []):
+                bw.delete_item(Key={"PK": it["PK"], "SK": it["SK"]})
+            lek = resp.get("LastEvaluatedKey")
+            if not lek:
+                break
+            kwargs["ExclusiveStartKey"] = lek
+
+
 def write_to_dynamo():
     import boto3
     ddb = boto3.resource("dynamodb")
     for logical, rows in BUF.items():
         name = TABLE_NAME[logical]
         table = ddb.Table(name)
+        _purge(table)
         with table.batch_writer(overwrite_by_pkeys=["PK", "SK"]) as bw:
             for r in rows:
                 bw.put_item(Item=strip_none(r))

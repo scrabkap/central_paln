@@ -244,6 +244,7 @@ def ep_promotions():
         "aces_strength": [r for r in rows
                           if r.get("record_type") == "aces_strength"],
         "allocations": [r for r in rows if r.get("record_type") == "allocation"],
+        "wh_supply": [r for r in rows if r.get("record_type") == "wh_supply"],
         "waves": [r for r in rows if r.get("record_type") == "wh_wave"],
     }
 
