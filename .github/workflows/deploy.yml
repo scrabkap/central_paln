@@ -114,15 +114,6 @@ jobs:
           echo "dist_id=$(get DistributionId)" >> "$GITHUB_OUTPUT"
           echo "url=$(get CloudFrontURL)" >> "$GITHUB_OUTPUT"
 
-      - name: Refresh Lambda code
-        run: |
-          aws lambda update-function-code \
-            --function-name "cp-poc-api-${STACK_NAME}" \
-            --s3-bucket "${{ steps.artifact.outputs.bucket }}" \
-            --s3-key "${{ steps.pkg.outputs.key }}" >/dev/null
-          aws lambda wait function-updated \
-            --function-name "cp-poc-api-${STACK_NAME}"
-
       - name: Upload SPA to S3
         run: |
           # no-cache on every asset so future deploys propagate without stale edge copies
@@ -139,6 +130,28 @@ jobs:
           aws cloudfront create-invalidation \
             --distribution-id "${{ steps.out.outputs.dist_id }}" \
             --paths "/*" >/dev/null
+
+      - name: Smoke test login through CloudFront
+        run: |
+          URL="${{ steps.out.outputs.url }}"
+          echo "POST $URL/api/login"
+          RESP=$(curl -s -m 30 -X POST "$URL/api/login" \
+            -H 'content-type: application/json' \
+            -d '{"username":"admin","password":"Prodbug76"}')
+          echo "response: $RESP"
+          echo "$RESP" | grep -q '"ok": *true' || { echo "::error::login returned ok!=true — login is broken"; exit 1; }
+          echo "$RESP" | grep -q '"token"'      || { echo "::error::login response has no token"; exit 1; }
+          # also verify a stale client (doubled /api) still works
+          RESP2=$(curl -s -m 30 -X POST "$URL/api/api/login" \
+            -H 'content-type: application/json' \
+            -d '{"username":"admin","password":"Prodbug76"}')
+          echo "stale-path response: $RESP2"
+          echo "$RESP2" | grep -q '"ok": *true' || echo "::warning::stale /api/api path not normalized"
+          # confirm a data route works with the issued token
+          TOKEN=$(printf '%s' "$RESP" | sed -n 's/.*"token": *"\([^"]*\)".*/\1/p')
+          OV=$(curl -s -m 30 "$URL/api/overview" -H "authorization: Bearer $TOKEN")
+          echo "overview ok: $(printf '%s' "$OV" | grep -o '"ok": *[a-z]*' | head -1)"
+          echo "Login smoke test passed."
 
       - name: Summary
         run: |
