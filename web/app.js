@@ -1478,7 +1478,7 @@ function decisionRuler(m) {
   const x = (v) => padX + (v / max) * (W - 2 * padX);
   const lo = Math.min(m.provider, m.value), hi = Math.max(m.provider, m.value);
   const markers = [["#6B8FC9", m.provider, "חיזוי מקורי"], ["#C9A36A", m.value, "הסכם מסחרי"]];
-  if (m.actualProjected != null) markers.push(["#9D7BC9", m.actualProjected, "תחזית מכר"]);
+  if (m.actualProjected != null) markers.push(["#9D7BC9", m.actualProjected, "מכר"]);
   let s = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">`;
   s += `<defs><pattern id="gapstripe" width="9" height="9" patternTransform="rotate(45)" patternUnits="userSpaceOnUse"><rect width="9" height="9" fill="rgba(201,163,106,.14)"/><line x1="0" y1="0" x2="0" y2="9" stroke="rgba(201,163,106,.5)" stroke-width="2"/></pattern></defs>`;
   s += `<rect x="${x(lo)}" y="${axisY - 15}" width="${Math.max(0, x(hi) - x(lo))}" height="30" fill="url(#gapstripe)" rx="3"/>`;
@@ -1575,40 +1575,72 @@ function historicalComparison(p, m) {
     ${rows.map((r) => `<tr><td><span dir="auto">${esc(r.label)}</span></td><td>${num(r.appr)}</td><td>${num(r.actual)}</td><td style="color:${r.deliv >= 100 ? "var(--role-approved)" : "var(--state-warn)"}">${r.deliv}%</td><td style="text-align:start;color:var(--text-dim)">${r.outcome}</td></tr>`).join("")}</tbody></table>`;
   return head + body;
 }
-function cumChart(labels, forecast, actual, elapsedIdx) {
-  const W = 840, H = 210, pad = { l: 46, r: 16, t: 16, b: 30 };
-  const max = Math.max(1, ...forecast, ...actual.filter((v) => v != null));
+function cumChart(labels, agreement, forecast, sales, stock, elapsedIdx) {
+  // 4 series:
+  //   · agreement (constant horizontal line) = הסכם מסחרי / חיזוי מאושר — the committed target
+  //   · forecast  (cumulative diagonal)      = חיזוי מצטבר — what the model predicts daily
+  //   · sales     (cumulative, stops today)  = מכר מצטבר   — actual sales realized so far
+  //   · stock     (per-day snapshot, dashed) = מלאי סניפים ממוצע — daily inventory snapshot across stores
+  const W = 840, H = 230, pad = { l: 56, r: 16, t: 18, b: 38 };
+  const all = [agreement, ...forecast, ...sales.filter((v) => v != null), ...(stock || [])];
+  const max = Math.max(1, ...all);
   const n = labels.length, iw = W - pad.l - pad.r, ih = H - pad.t - pad.b;
   const xx = (i) => pad.l + (n === 1 ? 0 : (i / (n - 1)) * iw);
   const yy = (v) => pad.t + ih - (v / max) * ih;
   let g = "";
-  for (let i = 0; i <= 4; i++) { const y = pad.t + (i / 4) * ih, val = max - (i / 4) * max;
-    g += `<line x1="${pad.l}" y1="${y}" x2="${W - pad.r}" y2="${y}" stroke="var(--border-soft)"/><text x="8" y="${y + 3}" fill="var(--text-mut)" font-size="10">${num(Math.round(val))}</text>`; }
-  const line = (data, color, w) => { const pts = data.map((v, i) => v == null ? null : `${xx(i)},${yy(v)}`).filter(Boolean);
-    return pts.length ? `<polyline points="${pts.join(" ")}" fill="none" stroke="${color}" stroke-width="${w}" stroke-linejoin="round" stroke-linecap="round"/>` : ""; };
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.t + (i / 4) * ih, val = max - (i / 4) * max;
+    g += `<line x1="${pad.l}" y1="${y}" x2="${W - pad.r}" y2="${y}" stroke="var(--border-soft)"/>`;
+    // Anchor numerals at the right edge of the left gutter, force LTR so the
+    // digits don't get clipped by the RTL container.
+    g += `<text x="${pad.l - 8}" y="${y + 3}" fill="var(--text-mut)" font-size="10" text-anchor="end" direction="ltr">${num(Math.round(val))}</text>`;
+  }
+  const line = (data, color, w, dash) => {
+    const pts = data.map((v, i) => v == null ? null : `${xx(i)},${yy(v)}`).filter(Boolean);
+    return pts.length ? `<polyline points="${pts.join(" ")}" fill="none" stroke="${color}" stroke-width="${w}"${dash ? ` stroke-dasharray="${dash}"` : ""} stroke-linejoin="round" stroke-linecap="round"/>` : "";
+  };
+  const agY = yy(agreement);
+  const agLine = agreement > 0 ? `<line x1="${pad.l}" y1="${agY}" x2="${W - pad.r}" y2="${agY}" stroke="var(--role-agreement)" stroke-width="2.2" stroke-dasharray="6 5"/>` : "";
+  const stockLine = (stock && stock.length) ? line(stock, "var(--accent-3)", 2, "7 5") : "";
   let today = "";
-  if (elapsedIdx != null && elapsedIdx >= 0 && elapsedIdx < n) { const px = xx(elapsedIdx);
-    today = `<line x1="${px}" y1="${pad.t}" x2="${px}" y2="${H - pad.b}" stroke="var(--border-strong)" stroke-dasharray="4 4"/>`; }
+  if (elapsedIdx != null && elapsedIdx >= 0 && elapsedIdx < n) {
+    const px = xx(elapsedIdx);
+    today = `<line x1="${px}" y1="${pad.t}" x2="${px}" y2="${H - pad.b}" stroke="var(--border-strong)" stroke-dasharray="4 4"/>`;
+  }
   const step = Math.ceil(n / 8); let xl = "";
-  labels.forEach((lb, i) => { if (i % step === 0 || i === n - 1) xl += `<text x="${xx(i)}" y="${H - 8}" text-anchor="middle" fill="var(--text-mut)" font-size="10">${esc(sdate(lb))}</text>`; });
-  return `<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">${g}${today}${line(forecast, "var(--role-approved)", 2.6)}${line(actual, "var(--role-actual)", 2.6)}${xl}</svg>
-    <div class="legend"><span><i style="background:var(--role-approved)"></i> חיזוי מצטבר</span><span><i style="background:var(--role-actual)"></i> מכר מצטבר</span></div>`;
+  labels.forEach((lb, i) => { if (i % step === 0 || i === n - 1) xl += `<text x="${xx(i)}" y="${H - 10}" text-anchor="middle" fill="var(--text-mut)" font-size="10" direction="ltr">${esc(sdate(lb))}</text>`; });
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">${g}${agLine}${today}${line(forecast, "var(--role-approved)", 2.6)}${line(sales, "var(--role-actual)", 2.6)}${stockLine}${xl}</svg>
+    <div class="legend"><span><i style="background:var(--role-agreement);height:3px;width:14px;border-radius:1px"></i> הסכם מסחרי</span><span><i style="background:var(--role-approved)"></i> חיזוי מצטבר</span><span><i style="background:var(--role-actual)"></i> מכר מצטבר</span><span><i style="background:var(--accent-3);height:0;width:16px;border-top:2px dashed var(--accent-3);border-radius:0"></i> מלאי סניפים ממוצע</span></div>`;
 }
 function midCampaignBlock(p, m) {
   const dur = Math.max(1, Number(p.duration_days) || 12);
   const elapsed = m.phase === "COMPLETED" ? dur : Math.min(dur, liveDayN(p));
-  const labels = [], fc = [], ac = [];
-  for (let day = 0; day <= dur; day++) { labels.push(addDaysIso(p.start_date, day)); fc.push(Math.round(m.value * day / dur));
-    ac.push(day <= elapsed ? Math.round(m.sold * day / Math.max(1, elapsed)) : null); }
-  const soldPct = m.value > 0 ? Math.round(m.sold / m.value * 100) : 0;
-  // Forecast quality = how close actual sales are to the expected sales for
-  // the SAME elapsed window. Comparing total-period sold to total-period
-  // forecast mid-campaign is wrong — pro-rate the forecast to the days lived.
-  const expected = m.value > 0 && dur > 0 ? Math.round(m.value * elapsed / dur) : 0;
-  const fq = m.phase === "COMPLETED" ? fqAcc(m.sold, m.value) : fqAcc(m.sold, expected);
+  // Build forecast (cumulative model = m.provider scaled by day) and actual
+  // sales (cumulative m.sold, null past today). Agreement (m.value) is a flat
+  // line drawn directly by the chart.
+  // Stock = total on-hand across all stores per day. Plausible POC curve:
+  // start with ~4 days of forecast on hand, deplete linearly, replenishment
+  // jitter for a sawtooth, deterministic per promo so the demo is stable.
+  const labels = [], fc = [], ac = [], ss = [];
+  const dailyForecast = m.provider / dur;
+  const openingStoresTotal = Math.round(dailyForecast * 4);
+  for (let day = 0; day <= dur; day++) {
+    labels.push(addDaysIso(p.start_date, day));
+    fc.push(Math.round(m.provider * day / dur));
+    ac.push(day <= elapsed ? Math.round(m.sold * day / Math.max(1, elapsed)) : null);
+    const depletion = Math.min(0.55, (day / dur) * 0.55);
+    const noise = 0.82 + 0.34 * hashFrac("stk#" + (p.promo_id || "") + "#" + day);
+    ss.push(Math.max(0, Math.round(openingStoresTotal * (1 - depletion) * noise)));
+  }
+  const soldPct = m.provider > 0 ? Math.round(m.sold / m.provider * 100) : 0;
+  // Forecast quality compares actual sales to the FORECAST (m.provider), not
+  // to the trade agreement (m.value) — decisions are made off the forecast.
+  // Mid-campaign the forecast is pro-rated to the days lived.
+  const expected = m.provider > 0 && dur > 0 ? Math.round(m.provider * elapsed / dur) : 0;
+  const fq = m.phase === "COMPLETED" ? fqAcc(m.sold, m.provider) : fqAcc(m.sold, expected);
   const perfChip = (v, l, u) => `<div class="chip"><div class="c-val">${v == null ? "—" : num(v) + (u || "")}</div><div class="c-lbl">${l}</div></div>`;
   return `<div class="card-sub" style="margin:2px 0 10px">יום ${elapsed} מתוך ${dur} · ${soldPct}% מהחיזוי נמכר</div>
-    ${cumChart(labels, fc, ac, elapsed)}
+    ${cumChart(labels, m.value, fc, ac, ss, elapsed)}
     <div class="chips" style="margin-top:14px">
       ${perfChip(fq, "איכות חיזוי", "%")}
       ${perfChip(cap100(Number(p.otif_pct)), "OTIF", "%")}
