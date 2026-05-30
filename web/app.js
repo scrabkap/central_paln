@@ -1612,35 +1612,132 @@ function cumChart(labels, agreement, forecast, sales, stock, elapsedIdx) {
   return `<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">${g}${agLine}${today}${line(forecast, "var(--role-approved)", 2.6)}${line(sales, "var(--role-actual)", 2.6)}${stockLine}${xl}</svg>
     <div class="legend"><span><i style="background:var(--role-agreement);height:3px;width:14px;border-radius:1px"></i> הסכם מסחרי</span><span><i style="background:var(--role-approved)"></i> חיזוי מצטבר</span><span><i style="background:var(--role-actual)"></i> מכר מצטבר</span><span><i style="background:var(--accent-3);height:0;width:16px;border-top:2px dashed var(--accent-3);border-radius:0"></i> מלאי סניפים ממוצע</span></div>`;
 }
+/* Daily view of the campaign — forecast vs sales as side-by-side bars per day
+   (or smoothed 7-day MA lines when toggled), agreement becomes a horizontal
+   run-rate target (= agreement/dur), store stock keeps the same dashed line. */
+function chartDaily(labels, runRate, dailyFc, dailySales, stock, elapsed, ma) {
+  const W = 840, H = 230, pad = { l: 56, r: 16, t: 18, b: 38 };
+  const ma7 = (data) => data.map((_, i) => {
+    let sum = 0, cnt = 0;
+    for (let j = Math.max(0, i - 6); j <= i; j++) {
+      if (data[j] != null) { sum += data[j]; cnt++; }
+    }
+    return cnt ? sum / cnt : null;
+  });
+  const fcSeries = ma ? ma7(dailyFc) : dailyFc;
+  const sdSeries = ma ? ma7(dailySales) : dailySales;
+  const stSeries = ma ? ma7(stock) : stock;
+  const n = labels.length, iw = W - pad.l - pad.r, ih = H - pad.t - pad.b;
+  const all = [runRate, ...fcSeries.filter((v) => v != null), ...sdSeries.filter((v) => v != null), ...stSeries.filter((v) => v != null)];
+  const max = Math.max(1, ...all);
+  const slotW = iw / n;
+  const cx = (i) => pad.l + (i + 0.5) * slotW;
+  const yy = (v) => pad.t + ih - (v / max) * ih;
+  let g = "";
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.t + (i / 4) * ih, val = max - (i / 4) * max;
+    g += `<line x1="${pad.l}" y1="${y}" x2="${W - pad.r}" y2="${y}" stroke="var(--border-soft)"/>`;
+    g += `<text x="${pad.l - 8}" y="${y + 3}" fill="var(--text-mut)" font-size="10" text-anchor="end" direction="ltr">${num(Math.round(val))}</text>`;
+  }
+  const rrY = yy(runRate);
+  const rrLine = runRate > 0 ? `<line x1="${pad.l}" y1="${rrY}" x2="${W - pad.r}" y2="${rrY}" stroke="var(--role-agreement)" stroke-width="2.2" stroke-dasharray="6 5"/>` : "";
+  let today = "";
+  if (elapsed > 0 && elapsed <= n) {
+    const px = pad.l + elapsed * slotW;
+    today = `<line x1="${px}" y1="${pad.t}" x2="${px}" y2="${H - pad.b}" stroke="var(--border-strong)" stroke-dasharray="4 4"/>`;
+  }
+  let content = "";
+  if (!ma) {
+    // Side-by-side bars per day: forecast left of slot center, sales right.
+    const barW = Math.max(2, slotW * 0.35), gap = Math.max(1, slotW * 0.05);
+    fcSeries.forEach((v, i) => {
+      if (v == null) return;
+      const h = (v / max) * ih, x = pad.l + i * slotW + slotW * 0.5 - barW - gap / 2;
+      content += `<rect x="${x}" y="${pad.t + ih - h}" width="${barW}" height="${h}" rx="2" fill="var(--role-approved)" fill-opacity=".8"/>`;
+    });
+    sdSeries.forEach((v, i) => {
+      if (v == null) return;
+      const h = (v / max) * ih, x = pad.l + i * slotW + slotW * 0.5 + gap / 2;
+      content += `<rect x="${x}" y="${pad.t + ih - h}" width="${barW}" height="${h}" rx="2" fill="var(--role-actual)" fill-opacity=".9"/>`;
+    });
+  } else {
+    // Smoothed lines (7-day MA)
+    const line = (data, color, w) => {
+      const pts = data.map((v, i) => v == null ? null : `${cx(i)},${yy(v)}`).filter(Boolean);
+      return pts.length ? `<polyline points="${pts.join(" ")}" fill="none" stroke="${color}" stroke-width="${w}" stroke-linejoin="round" stroke-linecap="round"/>` : "";
+    };
+    content = line(fcSeries, "var(--role-approved)", 2.6) + line(sdSeries, "var(--role-actual)", 2.6);
+  }
+  const stockPts = stSeries.map((v, i) => v == null ? null : `${cx(i)},${yy(v)}`).filter(Boolean);
+  const stockLine = stockPts.length ? `<polyline points="${stockPts.join(" ")}" fill="none" stroke="var(--accent-3)" stroke-width="2" stroke-dasharray="7 5" stroke-linejoin="round"/>` : "";
+  const step = Math.ceil(n / 8); let xl = "";
+  labels.forEach((lb, i) => { if (i % step === 0 || i === n - 1) xl += `<text x="${cx(i)}" y="${H - 10}" text-anchor="middle" fill="var(--text-mut)" font-size="10" direction="ltr">${esc(sdate(lb))}</text>`; });
+  const suffix = ma ? " (ממוצע 7 ימים)" : " יומי";
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">${g}${rrLine}${today}${content}${stockLine}${xl}</svg>
+    <div class="legend"><span><i style="background:var(--role-agreement);height:3px;width:14px;border-radius:1px"></i> קצב יעד (הסכם / יום)</span><span><i style="background:var(--role-approved)"></i> חיזוי${suffix}</span><span><i style="background:var(--role-actual)"></i> מכר${suffix}</span><span><i style="background:var(--accent-3);height:0;width:16px;border-top:2px dashed var(--accent-3);border-radius:0"></i> מלאי סניפים${ma ? " (ממוצע 7)" : ""}</span></div>`;
+}
+
 function midCampaignBlock(p, m) {
   const dur = Math.max(1, Number(p.duration_days) || 12);
   const elapsed = m.phase === "COMPLETED" ? dur : Math.min(dur, liveDayN(p));
-  // Build forecast (cumulative model = m.provider scaled by day) and actual
-  // sales (cumulative m.sold, null past today). Agreement (m.value) is a flat
-  // line drawn directly by the chart.
-  // Stock = total on-hand across all stores per day. Plausible POC curve:
-  // start with ~4 days of forecast on hand, deplete linearly, replenishment
-  // jitter for a sawtooth, deterministic per promo so the demo is stable.
-  const labels = [], fc = [], ac = [], ss = [];
+  // Build a realistic per-day shape (weekday/weekend + deterministic jitter),
+  // then derive both views from it so cumulative totals match m.provider /
+  // m.sold exactly. Past-today sales values are null.
+  const startDow = (() => { const d = new Date(p.start_date); return isNaN(d.getTime()) ? 0 : d.getDay(); })();
+  const dowMult = [0.85, 0.85, 0.9, 0.95, 1.25, 1.35, 1.05]; // Sun..Sat
+  const fcShape = [], acShape = [];
+  for (let d = 1; d <= dur; d++) {
+    const dow = (startDow + d - 1) % 7;
+    fcShape.push(dowMult[dow] * (0.85 + 0.3 * hashFrac("fcs#" + (p.promo_id || "") + "#" + d)));
+    acShape.push(dowMult[dow] * (0.85 + 0.3 * hashFrac("acs#" + (p.promo_id || "") + "#" + d)));
+  }
+  const fcShapeSum = fcShape.reduce((a, b) => a + b, 0) || 1;
+  const dailyFc = fcShape.map((s) => Math.round(m.provider * s / fcShapeSum));
+  const acShapeElapsed = acShape.slice(0, elapsed).reduce((a, b) => a + b, 0) || 1;
+  const dailySales = acShape.map((s, i) => i + 1 > elapsed ? null : Math.round(m.sold * s / acShapeElapsed));
+  // Cumulative arrays length dur+1 (day 0 = 0, day d = running sum)
+  const fcCum = [0], acCum = [0];
+  for (let d = 0; d < dur; d++) {
+    fcCum.push(fcCum[fcCum.length - 1] + dailyFc[d]);
+    const prev = acCum[acCum.length - 1];
+    acCum.push(dailySales[d] == null || prev == null ? null : prev + dailySales[d]);
+  }
+  // Store stock per day — daily snapshot regardless of view
   const dailyForecast = m.provider / dur;
   const openingStoresTotal = Math.round(dailyForecast * 4);
+  const stockCum = [];
   for (let day = 0; day <= dur; day++) {
-    labels.push(addDaysIso(p.start_date, day));
-    fc.push(Math.round(m.provider * day / dur));
-    ac.push(day <= elapsed ? Math.round(m.sold * day / Math.max(1, elapsed)) : null);
     const depletion = Math.min(0.55, (day / dur) * 0.55);
     const noise = 0.82 + 0.34 * hashFrac("stk#" + (p.promo_id || "") + "#" + day);
-    ss.push(Math.max(0, Math.round(openingStoresTotal * (1 - depletion) * noise)));
+    stockCum.push(Math.max(0, Math.round(openingStoresTotal * (1 - depletion) * noise)));
   }
+  const labelsCum = []; for (let day = 0; day <= dur; day++) labelsCum.push(addDaysIso(p.start_date, day));
+  const labelsDaily = labelsCum.slice(1);
+  const stockDaily = stockCum.slice(1);
+
+  // KPI chips always cumulative — single stable signal independent of view
   const soldPct = m.provider > 0 ? Math.round(m.sold / m.provider * 100) : 0;
-  // Forecast quality compares actual sales to the FORECAST (m.provider), not
-  // to the trade agreement (m.value) — decisions are made off the forecast.
-  // Mid-campaign the forecast is pro-rated to the days lived.
   const expected = m.provider > 0 && dur > 0 ? Math.round(m.provider * elapsed / dur) : 0;
   const fq = m.phase === "COMPLETED" ? fqAcc(m.sold, m.provider) : fqAcc(m.sold, expected);
   const perfChip = (v, l, u) => `<div class="chip"><div class="c-val">${v == null ? "—" : num(v) + (u || "")}</div><div class="c-lbl">${l}</div></div>`;
+
+  const mode = state._promoChartMode === "daily" ? "daily" : "cum";
+  const ma = !!state._promoChartMA && mode === "daily";
+  const toolbar = `<div class="chart-toolbar">
+    <div class="chip-group">
+      <button class="${mode === "cum" ? "active" : ""}" data-pchart="cum">מצטבר</button>
+      <button class="${mode === "daily" ? "active" : ""}" data-pchart="daily">יומי</button>
+    </div>
+    <label class="chart-ma ${mode === "cum" ? "disabled" : ""}" title="ממוצע נע — חל רק על מבט יומי">
+      <input type="checkbox" data-pchartma ${ma ? "checked" : ""} ${mode === "cum" ? "disabled" : ""}><span>ממוצע נע 7 ימים</span>
+    </label>
+  </div>`;
+  const chart = mode === "cum"
+    ? cumChart(labelsCum, m.value, fcCum, acCum, stockCum, elapsed)
+    : chartDaily(labelsDaily, m.value / dur, dailyFc, dailySales, stockDaily, elapsed, ma);
   return `<div class="card-sub" style="margin:2px 0 10px">יום ${elapsed} מתוך ${dur} · ${soldPct}% מהחיזוי נמכר</div>
-    ${cumChart(labels, m.value, fc, ac, ss, elapsed)}
+    ${toolbar}
+    <div id="promo-chart">${chart}</div>
     <div class="chips" style="margin-top:14px">
       ${perfChip(fq, "איכות חיזוי", "%")}
       ${perfChip(cap100(Number(p.otif_pct)), "OTIF", "%")}
@@ -1686,6 +1783,11 @@ function attachDetailHandlers(p, det, view) {
     const k = el.dataset.collapse; state._pdOpen.has(k) ? state._pdOpen.delete(k) : state._pdOpen.add(k); drawPromoDetail(p, det, view);
   }));
   view.querySelectorAll("[data-act]").forEach((el) => el.addEventListener("click", () => handleDetailAct(el.dataset.act, p, det, view)));
+  view.querySelectorAll("[data-pchart]").forEach((el) => el.addEventListener("click", () => {
+    state._promoChartMode = el.dataset.pchart; drawPromoDetail(p, det, view);
+  }));
+  const ma = view.querySelector("[data-pchartma]");
+  if (ma) ma.addEventListener("change", () => { state._promoChartMA = ma.checked; drawPromoDetail(p, det, view); });
   const tv = view.querySelector("#trade-val");
   if (tv) tv.addEventListener("change", () => {
     const q = parseFloat(tv.value); if (isNaN(q)) return;
