@@ -1911,22 +1911,26 @@ function resolveAceTarget(a, text) {
   if (o.value.startsWith("I#")) { a.item_barcode = o.value.slice(2); a.group_code = ""; }
   else { a.group_code = o.value.slice(2); a.item_barcode = ""; }
 }
-// Current WH stock for an item is a property of the ITEM — it doesn't move
-// when the user drags the price slider, picks a different display type, or
-// opens a different ACE on the same item. No live inventory feed in the POC,
-// so we derive a stable per-barcode number with hashFrac.
+// Current stock is a property of the ITEM (and, for stores, the format) — it
+// stays put when the planner drags the price slider, switches display type,
+// or opens a different ACE on the same item. No live inventory feed in the
+// POC, so we derive stable per-barcode numbers with hashFrac.
 function whStockForItem(bc) {
   return bc ? Math.round(2000 + 16000 * hashFrac("whstk#" + bc)) : 0;
 }
+function storeStockForItem(bc, fmtCode) {
+  return bc ? Math.round(600 + 6400 * hashFrac("ststk#" + bc + "#" + (fmtCode || ""))) : 0;
+}
 
-// Sweet-spot tier — the strength level with the highest contribution that
-// the planner can actually fulfill given (stock + trade_agreement).
-function aceSweetSpot(c, stock, trade) {
+// Sweet-spot tier — strength level with the highest contribution that we can
+// actually fulfil. Forecast = store sales, so the fulfilment cap is
+// store on-hand + WH stock + trade agreement (future supply).
+function aceSweetSpot(c, whStock, storeStock, trade) {
   const unitCost = c.catalog * 0.6;
-  const cap = (stock || 0) + (trade || 0);
+  const cap = (whStock || 0) + (storeStock || 0) + (trade || 0);
   let best = null;
   c.strengths.forEach((s) => {
-    if (cap > 0 && s.qty > cap) return; // unattainable under constraints
+    if (cap > 0 && s.qty > cap) return; // unattainable under combined supply
     const contribution = (s.price - unitCost) * s.qty;
     if (!best || contribution > best.contribution) best = { ...s, contribution };
   });
@@ -2143,31 +2147,99 @@ function drawAceEditor(view) {
     </div>`;
   attachAceHandlers(view);
 }
+// Strength-ladder wedge: the demand curve as a colored wedge growing from the
+// catalog-price end (left) to the deepest-discount end (right), with the four
+// strength tiers as color regions and a marker at the chosen price. Updates
+// live with the price slider.
+function aceWedge(c) {
+  const W = 800, H = 90, padX = 6, padTop = 6, padBot = 18;
+  const tiers = c.strengths;
+  const maxQty = Math.max(...tiers.map((t) => t.qty)) || 1;
+  const baseY = H - padBot;
+  const chartH = baseY - padTop;
+  const tierX = [padX, padX + (W - 2 * padX) / 3, padX + 2 * (W - 2 * padX) / 3, W - padX];
+  const tierH = tiers.map((t) => (t.qty / maxQty) * chartH);
+  const tierDiscs = tiers.map((t) => t.disc);
+  // Color zones: each tier owns the area centered on its X position; boundary
+  // between two adjacent tiers is the midpoint between their X positions.
+  const zoneBounds = [padX,
+    (tierX[0] + tierX[1]) / 2,
+    (tierX[1] + tierX[2]) / 2,
+    (tierX[2] + tierX[3]) / 2,
+    W - padX];
+  const tierFill = {
+    MEDIUM: "#4a9460", STRONG: "#2c7e75", DEEP: "#c08a3e", VERY_DEEP: "#7a4ec0",
+  };
+  // Wedge outline: bottom-left → bottom-right → up to tier 4's height →
+  // walk left along the tier qty waypoints → close to bottom-left.
+  const outline = [[padX, baseY], [W - padX, baseY]];
+  for (let i = 3; i >= 0; i--) outline.push([tierX[i], baseY - tierH[i]]);
+  const wedgePts = outline.map((p) => `${p[0]},${p[1]}`).join(" ");
+  // Map disc → x by piecewise-linear interpolation between tier x positions
+  const discToX = (d) => {
+    if (d <= tierDiscs[0]) return tierX[0];
+    if (d >= tierDiscs[3]) return tierX[3];
+    for (let i = 1; i < 4; i++) {
+      if (d <= tierDiscs[i]) {
+        const t = (d - tierDiscs[i - 1]) / (tierDiscs[i] - tierDiscs[i - 1]);
+        return tierX[i - 1] + t * (tierX[i] - tierX[i - 1]);
+      }
+    }
+    return tierX[3];
+  };
+  const heightAtX = (xPos) => {
+    if (xPos <= tierX[0]) return tierH[0];
+    if (xPos >= tierX[3]) return tierH[3];
+    for (let i = 1; i < 4; i++) {
+      if (xPos <= tierX[i]) {
+        const t = (xPos - tierX[i - 1]) / (tierX[i] - tierX[i - 1]);
+        return tierH[i - 1] + t * (tierH[i] - tierH[i - 1]);
+      }
+    }
+    return tierH[3];
+  };
+  let s = `<svg viewBox="0 0 ${W} ${H}" class="ace-wedge-svg" preserveAspectRatio="xMidYMid meet">`;
+  s += `<defs><clipPath id="aceWedgeClip"><polygon points="${wedgePts}"/></clipPath></defs>`;
+  s += `<g clip-path="url(#aceWedgeClip)">`;
+  for (let i = 0; i < 4; i++) {
+    const zx = zoneBounds[i], zw = zoneBounds[i + 1] - zoneBounds[i];
+    s += `<rect x="${zx}" y="0" width="${zw}" height="${H}" fill="${tierFill[tiers[i].cls] || "var(--text-mut)"}" fill-opacity=".88"/>`;
+  }
+  s += `</g>`;
+  s += `<polygon points="${wedgePts}" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>`;
+  const mx = discToX(c.disc);
+  const mh = heightAtX(mx);
+  const my = baseY - mh;
+  s += `<line x1="${mx}" y1="${baseY}" x2="${mx}" y2="${my - 6}" stroke="var(--text-strong)" stroke-width="2" stroke-opacity=".75"/>`;
+  s += `<circle cx="${mx}" cy="${my}" r="5" fill="var(--action)" stroke="var(--text-strong)" stroke-width="1.5"/>`;
+  s += `<text x="${mx}" y="${Math.max(14, my - 10)}" fill="var(--text-strong)" font-size="11" font-weight="700" text-anchor="middle" direction="ltr">${num(c.qty)}</text>`;
+  // Tier name labels along the X-axis
+  for (let i = 0; i < 4; i++) {
+    s += `<text x="${tierX[i]}" y="${H - 4}" fill="${tierFill[tiers[i].cls]}" font-size="10" font-weight="600" text-anchor="${i === 0 ? "start" : i === 3 ? "end" : "middle"}">${esc(tiers[i].label)}</text>`;
+  }
+  return s + `</svg>`;
+}
+
 function aceStrengthViz(a, c) {
   const bc = a.item_barcode || (a.group_code ? groupLeader(a.group_code) : "");
-  const stock = whStockForItem(bc);
+  const whStock = whStockForItem(bc);
+  const stStock = storeStockForItem(bc, a.format_code);
   const trade = Number(a.trade_agreement || 0);
-  const sweet = aceSweetSpot(c, stock, trade);
-  const btns = c.strengths.slice().reverse().map((s) => {
-    const isSweet = sweet && s.cls === sweet.cls;
-    const isActive = c.current.cls === s.cls;
-    return `<button class="str-btn ${isActive ? "active" : ""} ${isSweet ? "sweet" : ""}" data-acestr="${s.cls}">
-      ${isSweet ? `<span class="str-sweet" title="סוויט-ספוט תחת מגבלות מלאי + הסכם">⭐</span>` : ""}
-      <div class="s-lbl">${s.label}</div><div class="s-qty" dir="ltr">${num(s.qty)}</div><div class="s-price" dir="ltr">${money(s.price)}</div></button>`;
-  }).join("");
+  const sweet = aceSweetSpot(c, whStock, stStock, trade);
+  // Sweet spot is communicated by the caption below the ladder — no star
+  // icon on the tier cards.
+  const btns = c.strengths.slice().reverse().map((s) =>
+    `<button class="str-btn ${c.current.cls === s.cls ? "active" : ""}" data-acestr="${s.cls}">
+      <div class="s-lbl">${s.label}</div><div class="s-qty" dir="ltr">${num(s.qty)}</div><div class="s-price" dir="ltr">${money(s.price)}</div></button>`).join("");
   const vsTrade = trade > 0 ? `<span class="${c.qty >= trade ? "" : "mut"}" style="color:${c.qty >= trade ? "var(--role-approved)" : "var(--state-bad)"}">${c.qty >= trade ? "מעל" : "מתחת"} להסכם (${num(trade)})</span>` : "";
-  // Constrained sweet-spot caption: which tier actually maximises contribution
-  // once we account for current WH stock + the trade agreement as a supply cap.
-  const sweetCap = stock + trade;
   const sweetSub = sweet
-    ? (sweet.qty <= sweetCap || sweetCap === 0
-        ? `סוויט-ספוט תחת מגבלות מלאי + הסכם: <b style="color:var(--text)">${sweet.label}</b> · ${num(sweet.qty)} יח׳ במחיר ${money(sweet.price)} (תרומה צפויה ${num(Math.round(sweet.contribution))} ₪).`
-        : "")
-    : `<span style="color:var(--state-warn)">אין רמה אטרקטיבית בתוך המגבלות (מלאי ${num(stock)} + הסכם ${num(trade)}). שקול הגדלת הסכם או רענון מלאי לפני קביעת המחיר.</span>`;
+    ? `סוויט-ספוט תחת מגבלות מלאי (מחסן+סניפים) + הסכם: <b style="color:var(--text)">${sweet.label}</b> · ${num(sweet.qty)} יח׳ במחיר ${money(sweet.price)} (תרומה צפויה ${num(Math.round(sweet.contribution))} ₪).`
+    : `<span style="color:var(--state-warn)">אין רמה אטרקטיבית בתוך המגבלות (מחסן ${num(whStock)} + סניפים ${num(stStock)} + הסכם ${num(trade)}). שקול הגדלת הסכם או רענון מלאי לפני קביעת המחיר.</span>`;
   return `<div class="ace-viz">
     <div class="ace-qty-big">חיזוי במחיר הנבחר: <span dir="ltr" class="role-num agreement" style="font-size:30px">${num(c.qty)}</span> <span class="mut" style="font-size:14px">יח'</span> ${vsTrade}</div>
     <div class="str-grid">${btns}</div>
-    ${sweetSub ? `<div class="ace-sweet-note">${sweetSub}</div>` : ""}
+    <div class="ace-wedge" id="ace-wedge">${aceWedge(c)}</div>
+    <div class="ace-sweet-note">${sweetSub}</div>
     <div class="price-row">
       <label>מחיר אס — ברירת מחדל = מחיר קטלוג (<span dir="ltr">${money(c.catalog)}</span>). הזזה משמאל מעמיקה את ההנחה ומגדילה את החיזוי.</label>
       <input type="range" id="ace-price" min="${c.minPrice}" max="${c.catalog}" step="0.1" value="${c.price}">
@@ -2227,6 +2299,7 @@ function attachAceHandlers(view) {
     set("#ace-price-val", money(c.price)); set("#ace-disc-val", c.discPct + "% הנחה"); set("#ace-str-val", c.current.label);
     const big = view.querySelector(".ace-qty-big .role-num"); if (big) big.textContent = num(c.qty);
     view.querySelectorAll(".str-btn").forEach((b) => b.classList.toggle("active", b.dataset.acestr === c.current.cls));
+    const wedge = view.querySelector("#ace-wedge"); if (wedge) wedge.innerHTML = aceWedge(c);
     const health = view.querySelector("#ace-health"); if (health) health.innerHTML = aceHealth(state._aceDraft, c);
   });
   const unlink = view.querySelector("[data-aceunlink]");
