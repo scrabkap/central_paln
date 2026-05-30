@@ -553,6 +553,14 @@ tr.agg:hover .tree-chev { color: var(--text); }
 .dec-pill.locked { color: var(--role-approved); background: var(--role-approved-soft); border-color: rgba(94, 186, 140, .35); }
 .dec-pill.closed { color: var(--text-mut); background: var(--surface-3); border-color: var(--border); }
 
+/* ACE health-tile mini bars (forecast / stock / agreement comparison) */
+.ace-stkmini { margin: 10px 0 8px; display: flex; flex-direction: column; gap: 6px; }
+.ace-stkmini-row { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+.ace-stkmini-lbl { width: 38px; color: var(--text-mut); flex-shrink: 0; text-align: end; font-weight: 600; }
+.ace-stkmini-bar { flex: 1; height: 7px; background: var(--bg-2); border-radius: 999px; overflow: hidden; min-width: 60px; }
+.ace-stkmini-bar > i { display: block; height: 100%; border-radius: 999px; transition: width .15s; }
+.ace-stkmini-val { font-variant-numeric: tabular-nums; font-weight: 700; min-width: 54px; text-align: end; font-family: "Inter", "Heebo", sans-serif; }
+
 /* promo progress chart toolbar (daily/cumulative + 7-day MA) */
 .chart-toolbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 4px 0 10px; }
 .chart-ma { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-dim);

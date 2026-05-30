@@ -1911,9 +1911,19 @@ function resolveAceTarget(a, text) {
   if (o.value.startsWith("I#")) { a.item_barcode = o.value.slice(2); a.group_code = ""; }
   else { a.group_code = o.value.slice(2); a.item_barcode = ""; }
 }
+function aceStockMiniBars(rows) {
+  // rows: [{label, value, color}] — drawn at relative scale to the max
+  const max = Math.max(1, ...rows.map((r) => Number(r.value) || 0));
+  const w = (v) => v > 0 ? Math.max(3, Math.round(v / max * 100)) : 0;
+  return `<div class="ace-stkmini">${rows.map((r) =>
+    `<div class="ace-stkmini-row"><span class="ace-stkmini-lbl">${esc(r.label)}</span><div class="ace-stkmini-bar"><i style="width:${w(r.value)}%;background:${r.color}"></i></div><span class="ace-stkmini-val" style="color:${r.color}">${num(r.value)}</span></div>`
+  ).join("")}</div>`;
+}
+
 function aceHealth(a, c) {
   const trade = Number(a.trade_agreement || 0);
-  const tile = (q, ans, tone, foot) => `<div class="health-tile"><div class="ht-q">${q}</div><div class="ht-a ${tone}">${ans}</div><div class="ht-calc">${foot}</div></div>`;
+  const tile = (q, ans, tone, body, foot) => `<div class="health-tile"><div class="ht-q">${q}</div><div class="ht-a ${tone}">${ans}</div>${body || ""}<div class="ht-calc">${foot}</div></div>`;
+  // ---- T1: forecast vs trade agreement (with mini comparison bars) ----
   let t1;
   if (trade > 0) {
     const gi = gapInfo(c.qty, trade);
@@ -1921,22 +1931,44 @@ function aceHealth(a, c) {
     const excessUnits = Math.max(0, trade - c.qty), shortUnits = Math.max(0, c.qty - trade);
     const excessCost = Math.round(excessUnits * unitCost * (0.0008 * 30 + 0.025 + 0.03));
     const lostSale = Math.round(shortUnits * c.price);
+    const bars = aceStockMiniBars([
+      { label: "חיזוי", value: c.qty, color: "var(--role-approved)" },
+      { label: "הסכם", value: trade, color: "var(--role-agreement)" },
+    ]);
     if (c.qty >= trade) {
-      t1 = tile("חיזוי האס מול ההסכם המסחרי", `${gi.pct > 0 ? "+" : ""}${gi.pct}% מעל ההסכם`, gi.pct >= 15 ? "warn" : "good",
-        `חיזוי ${num(c.qty)} מול הסכם ${num(trade)}.${shortUnits > 0 ? ` הזמנה לפי ההסכם בלבד תחמיץ מכירות בשווי ${money(lostSale)}.` : ""}`);
+      t1 = tile("חיזוי האס מול ההסכם המסחרי", `${gi.pct > 0 ? "+" : ""}${gi.pct}% מעל ההסכם`, gi.pct >= 15 ? "warn" : "good", bars,
+        `${shortUnits > 0 ? `הזמנה לפי ההסכם בלבד תחמיץ מכירות בשווי ${money(lostSale)}.` : "ההסכם תואם את החיזוי."}`);
     } else {
-      t1 = tile("חיזוי האס מול ההסכם המסחרי", `${gi.pct}% מתחת להסכם`, "bad",
-        `ההסכם (${num(trade)}) גבוה מהחיזוי (${num(c.qty)}) → עודף מלאי צפוי בעלות ${money(excessCost)}.`);
+      t1 = tile("חיזוי האס מול ההסכם המסחרי", `${gi.pct}% מתחת להסכם`, "bad", bars,
+        `ההסכם גבוה מהחיזוי → עודף מלאי צפוי בעלות ${money(excessCost)}.`);
     }
   } else {
-    t1 = tile("חיזוי האס מול ההסכם המסחרי", "לא הוזן הסכם", "neutral", "הזן הסכם מסחרי כדי לראות פערים ועלות עודף/חוסר.");
+    t1 = tile("חיזוי האס מול ההסכם המסחרי", "לא הוזן הסכם", "neutral", "", "הזן הסכם מסחרי כדי לראות פערים ועלות עודף/חוסר.");
   }
+  // ---- T2: position vs strength tiers ----
   const t2 = tile("מיקום מול רמות החוזק", c.current.label,
-    c.current.cls === "VERY_DEEP" ? "warn" : "neutral",
+    c.current.cls === "VERY_DEEP" ? "warn" : "neutral", "",
     `${c.discPct}% הנחה · חיזוי ${num(c.qty)} יח' (טווח ${num(c.strengths[0].qty)}–${num(c.strengths[3].qty)}).`);
-  const deepest = c.strengths[c.strengths.length - 1];
-  const t3 = tile("השפעת המחיר על החיזוי", "הורדת מחיר = חיזוי גבוה יותר", "neutral",
-    `במחיר הנמוך ביותר (${money(deepest.price)} · 80% הנחה) החיזוי מגיע ל-${num(deepest.qty)} יח'.`);
+  // ---- T3: WH stock vs needed (forecast) vs agreement ----
+  // No live stock feed in the POC — derive deterministically from the item
+  // so the card behaviour is stable for any given ACE.
+  const bc = a.item_barcode || (a.group_code ? groupLeader(a.group_code) : "");
+  const stock = bc && c.qty > 0 ? Math.round(c.qty * (0.45 + 0.45 * hashFrac("acewh#" + bc + "#" + (a.id || "")))) : 0;
+  const need = c.qty;
+  const gap = Math.max(0, need - stock);
+  const cov = need > 0 ? Math.min(999, Math.round(stock / need * 100)) : 0;
+  const stkBars = aceStockMiniBars([
+    { label: "מלאי", value: stock, color: "var(--role-actual)" },
+    { label: "חיזוי", value: need, color: "var(--role-approved)" },
+    ...(trade > 0 ? [{ label: "הסכם", value: trade, color: "var(--role-agreement)" }] : []),
+  ]);
+  let tone3, msg3;
+  if (need === 0) { tone3 = "neutral"; msg3 = "אין חיזוי כמותי לחישוב כיסוי."; }
+  else if (gap === 0) { tone3 = "good"; msg3 = `המלאי הקיים מכסה את החיזוי — עודף ${num(stock - need)} יח'.`; }
+  else if (trade === 0) { tone3 = "bad"; msg3 = `חוסר ${num(gap)} יח' ואין הסכם לכיסוי הפער.`; }
+  else if (stock + trade >= need) { tone3 = "warn"; msg3 = `חוסר ${num(gap)} יח' במלאי; ההסכם (${num(trade)}) מכסה את הפער.`; }
+  else { tone3 = "bad"; msg3 = `חוסר ${num(gap)} יח'; גם עם ההסכם חסרים עוד ${num(need - stock - trade)} יח'.`; }
+  const t3 = tile("מלאי מחסן מול דרישה והסכם", need > 0 ? cov + "% כיסוי" : "—", tone3, stkBars, msg3);
   return `<div class="health-grid ace-health">${t1}${t2}${t3}</div>`;
 }
 function aceTargetName(a) {
