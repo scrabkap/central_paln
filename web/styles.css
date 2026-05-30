@@ -513,14 +513,6 @@ tr.agg:hover .tree-chev { color: var(--text); }
 
 .ace-viz { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
 .ace-qty-big { font-size: 15px; color: var(--text-dim); margin-bottom: 14px; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-.str-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
-.str-btn { background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
-  padding: 12px 10px; text-align: center; cursor: pointer; transition: border-color .12s, background .12s; }
-.str-btn:hover { border-color: var(--border-strong); }
-.str-btn.active { border-color: var(--role-agreement); background: var(--role-agreement-soft); }
-.str-btn .s-lbl { font-size: 12px; font-weight: 600; color: var(--text); }
-.str-btn .s-qty { font-size: 18px; font-weight: 700; color: var(--role-agreement); font-variant-numeric: tabular-nums; margin: 3px 0; }
-.str-btn .s-price { font-size: 11px; color: var(--text-mut); font-variant-numeric: tabular-nums; }
 .price-row { margin-top: 16px; }
 .price-row label { display: block; font-size: 12px; color: var(--text-mut); margin-bottom: 10px; }
 .price-row input[type="range"] { width: 100%; accent-color: var(--action); height: 6px; }
@@ -530,7 +522,7 @@ tr.agg:hover .tree-chev { color: var(--text); }
 .ace-actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
 .ace-actions .dec-btn { padding: 11px 24px; }
 .health-grid.ace-health { grid-template-columns: repeat(3, 1fr); }
-@media (max-width: 980px) { .str-grid, .health-grid.ace-health { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 980px) { .health-grid.ace-health { grid-template-columns: repeat(2, 1fr); } }
 
 /* duo (two decision cards) + inline trade-agreement editor */
 .duo { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
@@ -562,12 +554,11 @@ tr.agg:hover .tree-chev { color: var(--text); }
 .ace-gk-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
 .ace-gk-lbl { color: var(--text-mut); }
 .ace-gk-val { font-variant-numeric: tabular-nums; font-weight: 700; font-family: "Inter", "Heebo", sans-serif; direction: ltr; }
-/* strength-ladder wedge — demand curve growing from catalog → deepest discount */
-.ace-wedge { margin: 16px 0 6px; background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 8px 2px; }
+/* strength-ladder wedge — smooth demand curve with soft gradient + tier labels */
+.ace-wedge { margin: 14px 0 10px; background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 4px 6px 6px; }
 .ace-wedge-svg { width: 100%; height: auto; display: block; }
-.ace-sweet-note { margin-top: 8px; padding: 9px 12px; background: var(--role-agreement-soft); border: 1px solid rgba(201, 163, 106, .35);
-  border-radius: var(--radius-sm); font-size: 12.5px; color: var(--text-dim); line-height: 1.55; }
-.ace-sweet-note b { color: var(--text-strong); }
+.ace-wedge-svg [data-acestr] { transition: opacity .12s; }
+.ace-wedge-svg [data-acestr]:hover { opacity: .82; }
 
 /* promo progress chart toolbar (daily/cumulative + 7-day MA) */
 .chart-toolbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 4px 0 10px; }
