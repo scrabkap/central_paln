@@ -553,13 +553,23 @@ tr.agg:hover .tree-chev { color: var(--text); }
 .dec-pill.locked { color: var(--role-approved); background: var(--role-approved-soft); border-color: rgba(94, 186, 140, .35); }
 .dec-pill.closed { color: var(--text-mut); background: var(--surface-3); border-color: var(--border); }
 
-/* ACE health-tile mini bars (forecast / stock / agreement comparison) */
-.ace-stkmini { margin: 10px 0 8px; display: flex; flex-direction: column; gap: 6px; }
-.ace-stkmini-row { display: flex; align-items: center; gap: 8px; font-size: 11px; }
-.ace-stkmini-lbl { width: 38px; color: var(--text-mut); flex-shrink: 0; text-align: end; font-weight: 600; }
-.ace-stkmini-bar { flex: 1; height: 7px; background: var(--bg-2); border-radius: 999px; overflow: hidden; min-width: 60px; }
-.ace-stkmini-bar > i { display: block; height: 100%; border-radius: 999px; transition: width .15s; }
-.ace-stkmini-val { font-variant-numeric: tabular-nums; font-weight: 700; min-width: 54px; text-align: end; font-family: "Inter", "Heebo", sans-serif; }
+/* ACE health-tile gauge: one horizontal track + markers + colored-dot legend.
+   Replaces the previous stacked-bar layout. */
+.ace-gauge { margin: 12px 0 10px; }
+.ace-gauge-svg { width: 100%; height: auto; display: block; }
+.ace-gauge-key { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 6px; font-size: 11.5px; }
+.ace-gk-item { display: inline-flex; align-items: center; gap: 6px; }
+.ace-gk-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+.ace-gk-lbl { color: var(--text-mut); }
+.ace-gk-val { font-variant-numeric: tabular-nums; font-weight: 700; font-family: "Inter", "Heebo", sans-serif; direction: ltr; }
+/* sweet-spot marker on the strength tier card */
+.str-btn { position: relative; }
+.str-btn.sweet { border-color: var(--role-agreement); box-shadow: 0 0 0 1px var(--role-agreement) inset; }
+.str-btn.sweet.active { box-shadow: 0 0 0 1px var(--role-agreement) inset, 0 0 0 2px rgba(201, 163, 106, .25); }
+.str-sweet { position: absolute; top: 6px; inset-inline-end: 8px; font-size: 13px; line-height: 1; filter: drop-shadow(0 0 4px rgba(201, 163, 106, .55)); }
+.ace-sweet-note { margin-top: 12px; padding: 9px 12px; background: var(--role-agreement-soft); border: 1px solid rgba(201, 163, 106, .35);
+  border-radius: var(--radius-sm); font-size: 12.5px; color: var(--text-dim); line-height: 1.55; }
+.ace-sweet-note b { color: var(--text-strong); }
 
 /* promo progress chart toolbar (daily/cumulative + 7-day MA) */
 .chart-toolbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 4px 0 10px; }
